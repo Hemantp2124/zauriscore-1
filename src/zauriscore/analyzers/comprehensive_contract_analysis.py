@@ -2,6 +2,7 @@ import sys
 import json
 import logging
 import os
+import os
 import tempfile
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
@@ -11,7 +12,7 @@ from slither.core.declarations import Function, Contract, FunctionContract
 from slither.slithir.operations import HighLevelCall, LowLevelCall, InternalCall
 from slither.slithir.variables import Constant
 from slither.core.variables.state_variable import StateVariable
-from slither.core.cfg.node import Node
+from slither.core.cfg.node import Node, WhileNode, ForNode
 from slither.core.expressions.expression import Expression
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -24,6 +25,7 @@ import requests
 # Import our analyzers
 from .code_similarity import CodeSimilarityAnalyzer
 from .gas_optimizer import GasOptimizationAnalyzer
+from .mythril_analyzer import MythrilAnalyzer
 
 # Load environment variables from .env file
 load_dotenv()
@@ -68,6 +70,26 @@ class ComprehensiveContractAnalyzer:
 
         # Initialize our analyzers
         self.gas_optimizer = GasOptimizationAnalyzer()
+        self.mythril_analyzer = MythrilAnalyzer()
+
+        self.chain_ids = {
+            'ethereum': 1,
+            'polygon': 137,
+            'arbitrum': 42161,
+            'optimism': 10
+        }
+        self.api_bases = {
+            'ethereum': 'https://api.etherscan.io',
+            'polygon': 'https://api.polygonscan.com',
+            'arbitrum': 'https://api.arbiscan.io',
+            'optimism': 'https://api-optimistic.etherscan.io'
+        }
+        self.api_keys = {
+            'ethereum': self.etherscan_api_key,
+            'polygon': os.getenv('POLYGONSCAN_API_KEY'),
+            'arbitrum': os.getenv('ARBISCAN_API_KEY'),
+            'optimism': os.getenv('OPTIMISM_ETHERSCAN_API_KEY')
+        }
         self._load_codebert()
 
     def _load_codebert(self):
@@ -124,7 +146,7 @@ class ComprehensiveContractAnalyzer:
             return {'error': str(e)}
 
     def _generate_summary(self, results: Dict[str, Any]) -> None:
-        """Generate a summary of the analysis results."""
+        """Generate a summary of the analysis results with enhanced NLG explanations."""
         # Calculate total issues
         results['summary']['total_issues'] = sum(
             results['static_analysis']['summary'].values()
@@ -149,7 +171,122 @@ class ComprehensiveContractAnalyzer:
         else:
             results['summary']['gas_efficiency'] = 'Good'
 
-        # Generate recommendations
+        # Vulnerability explanations mapping
+        vuln_explanations = {
+            'reentrancy': 'Reentrancy attacks occur when external calls are made before state changes, allowing attackers to drain funds multiple times. Fix by following checks-effects-interactions pattern.',
+            'integer_overflow': 'Integer overflow/underflow can manipulate values beyond expected ranges, leading to incorrect calculations. Use SafeMath library or Solidity 0.8+.',
+            'unchecked_low_level': 'Unchecked low-level calls (e.g., call(), send()) can fail silently, ignoring return values and potentially leading to loss of funds. Always check return values.',
+            'timestamp_dependency': 'Using block.timestamp for randomness or time-sensitive logic can be manipulated by miners. Use stronger randomness sources like Chainlink VRF.',
+            'short_address_attack': 'Short address attacks exploit poor address validation in abi.decode. Ensure fixed-size decoding or validation checks.',
+            'access_control': 'Missing access control allows unauthorized users to call sensitive functions. Use modifiers like onlyOwner.',
+            'arbitrary_jump': 'Arbitrary jump vulnerabilities allow control flow hijacking via unchecked assembly or jumps. Avoid unchecked assembly.',
+            'tx_origin_phishing': 'Using tx.origin for authentication is insecure as it can be manipulated by phishing contracts. Use msg.sender instead.'
+        }
+
+        # Generate plain-language vulnerability explanations
+        explanations = []
+        detectors = results['static_analysis'].get('detectors', [])
+        for detector in detectors:
+            vuln_type = detector.get('check', 'unknown').lower()
+            explanation = vuln_explanations.get(vuln_type, f'Vulnerability detected: {vuln_type}. Review the code for security issues.')
+            explanations.append({
+                'type': vuln_type,
+                'impact': detector.get('impact', 'Unknown'),
+                'explanation': explanation,
+                'confidence': detector.get('confidence', 'Medium'),
+                'line': detector.get('impact_contracts', [{}])[0].get('source_line', 'N/A')
+            })
+        results['summary']['vulnerability_explanations'] = explanations
+
+        # Risk score interpretation
+        if 'trust_risk_scoring' in results:
+            risk_score = results['trust_risk_scoring']['risk_score']
+            reputation_index = results['trust_risk_scoring']['reputation_index']
+            if risk_score > 80:
+                risk_interp = 'Very High Risk: This contract has significant security, optimization, and/or historical concerns. Immediate remediation required before deployment.'
+            elif risk_score > 50:
+                risk_interp = 'Moderate Risk: Potential issues identified; thorough audit recommended.'
+            else:
+                risk_interp = 'Low Risk: Generally secure, but continued monitoring advised.'
+            results['summary']['risk_interpretation'] = {
+                'risk_score': risk_score,
+                'reputation_index': reputation_index,
+                'interpretation': risk_interp,
+                'advice': 'Consider professional audit for production use.'
+            }
+
+        # Detailed optimization suggestions
+        gas_opps = results['gas_optimization'].get('opportunities', [])
+        opt_suggestions = []
+        for opp in gas_opps:
+            opt_suggestions.append({
+                'description': opp.get('description', 'Optimization opportunity'),
+                'estimated_gas_savings': opp.get('estimated_savings', 0),
+                'code_location': opp.get('line', 'N/A'),
+                'suggestion': opp.get('suggestion', 'Review and refactor code as per Slither guidance.')
+            })
+        if 'gas_optimization' in results:
+            results['summary']['optimization_suggestions'] = {
+                'total_opportunities': len(opt_suggestions),
+                'estimated_total_savings': results['gas_optimization'].get('estimated_savings', 0),
+                'suggestions': opt_suggestions
+            }
+
+        # Threshold-based alerts
+        alerts = []
+        if high_issues > 0:
+            alerts.append('ALERT: High-severity vulnerabilities detected!')
+        if results.get('ml_score', 0) > 5:
+            alerts.append('ALERT: ML model flags potential vulnerabilities.')
+        if results.get('overall_score', 0) > 6:
+            alerts.append('ALERT: Overall score indicates risks.')
+        if 'trust_risk_scoring' in results and results['trust_risk_scoring']['risk_score'] > 70:
+            alerts.append('CRITICAL ALERT: High risk score - deployment not recommended.')
+        results['summary']['alerts'] = alerts
+
+        # Consolidated plain-language report
+        plain_report = [
+            f"## Smart Contract Analysis Report",
+            f"### Contract Overview",
+            f"- Name: {results.get('contract_name', 'Unknown')}",
+            f"- Address: {results.get('contract_address', 'N/A')}",
+            f"- Security Risk Level: {results['summary']['security_risk']}",
+            f"- Total Issues: {results['summary']['total_issues']}",
+            f"- Gas Efficiency: {results['summary'].get('gas_efficiency', 'Unknown')}",
+            f"### Risk Assessment",
+            f"- Overall Score: {results.get('overall_score', 0):.2f}/10 (higher = riskier)",
+            f"- ML Score: {results.get('ml_score', 0):.2f}/10",
+            f"- Slither Score: {results.get('slither_score', 0):.2f}/10",
+            f"- Mythril Score: {results.get('mythril_score', 0):.2f}/10",
+        ]
+        if 'trust_risk_scoring' in results:
+            plain_report.extend([
+                f"- Risk Score: {results['trust_risk_scoring']['risk_score']}/100",
+                f"- Reputation Index: {results['trust_risk_scoring']['reputation_index']}/100",
+                f"{results['summary']['risk_interpretation']['interpretation']}",
+            ])
+        plain_report.extend([
+            f"### Key Findings",
+            f"- High Severity: {high_issues}",
+            f"- Medium Severity: {medium_issues}",
+            f"- Gas Savings Potential: ~{results['gas_optimization'].get('estimated_savings', 0)} gas",
+        ])
+        if explanations:
+            plain_report.append("### Vulnerability Explanations")
+            for exp in explanations[:5]:  # Limit to top 5
+                plain_report.append(f"- {exp['type'].title()}: {exp['explanation'][:100]}... (Line: {exp['line']})")
+        if opt_suggestions:
+            plain_report.append("### Optimization Suggestions")
+            for sug in opt_suggestions[:3]:
+                plain_report.append(f"- {sug['description']}: Savings ~{sug['estimated_gas_savings']} gas (Line: {sug['code_location']})")
+        if alerts:
+            plain_report.append("### Alerts")
+            plain_report.extend([f"- {alert}" for alert in alerts])
+        plain_report.append("### Recommendations")
+        plain_report.append(results['summary']['recommendations'] or ["No specific recommendations at this time."])
+        results['summary']['plain_language_report'] = '\n'.join(plain_report)
+
+        # Generate recommendations (enhanced legacy for backward compatibility)
         recommendations = []
         
         # Add security recommendations
@@ -168,12 +305,66 @@ class ComprehensiveContractAnalyzer:
             if confidence > 0.7:
                 recommendations.append("ML model detected potential vulnerabilities. Review ML analysis results.")
         
+        # Add risk-based recommendations
+        if 'trust_risk_scoring' in results:
+            risk_score = results['trust_risk_scoring']['risk_score']
+            if risk_score > 80:
+                recommendations.append("CRITICAL: High risk score. Do not deploy without fixes.")
+            elif risk_score > 50:
+                recommendations.append("WARNING: Moderate risk. Review thoroughly.")
+            else:
+                recommendations.append("SAFE: Low risk score. Suitable for deployment.")
         results['summary']['recommendations'] = recommendations
 
-    def analyze_contract(self, contract_address: str = None, source_code: str = None) -> Dict[str, Any]:
+    def _extract_features(self, contract):
+        """Extract detailed features from the contract AST using Slither."""
+        features = {
+            'functions': [],
+            'state_variables': [],
+            'modifiers': [],
+            'loops': 0
+        }
+    
+        # Extract functions
+        for func in contract.functions:
+            func_info = {
+                'name': func.name,
+                'visibility': func.visibility,
+                'is_constructor': func.is_constructor,
+                'returns': [ret.type.name if ret.type else 'void' for ret in func.returns],
+                'parameters': [param.type.name if param.type else 'unknown' for param in func.parameters]
+            }
+            features['functions'].append(func_info)
+    
+            # Extract modifiers
+            if func.modifiers:
+                for mod in func.modifiers:
+                    if mod.name not in features['modifiers']:
+                        features['modifiers'].append(mod.name)
+    
+            # Count loops in function body
+            for node in func.nodes:
+                if isinstance(node, (WhileNode, ForNode)):
+                    features['loops'] += 1
+    
+        # Extract state variables (storage)
+        for var in contract.state_variables:
+            var_info = {
+                'name': var.name,
+                'type': var.type.name if var.type else 'unknown',
+                'visibility': var.visibility,
+                'is_constant': var.is_constant,
+                'is_immutable': var.is_immutable
+            }
+            features['state_variables'].append(var_info)
+    
+        return features
+
+    def analyze_contract(self, contract_address: str = None, source_code: str = None, chain: str = 'ethereum') -> Dict[str, Any]:
         results = {
             'analysis_timestamp': datetime.now().isoformat(),
             'contract_address': contract_address,
+            'chain': chain,
             'contract_name': 'Unknown',
             'compiler_version': 'Unknown',
             'optimization_used': 'Unknown',
@@ -212,8 +403,8 @@ class ComprehensiveContractAnalyzer:
         # Prepare source code and filesystem layout
         try:
             if source_code is None and contract_address:
-                # Get source code from Etherscan
-                contract_data = self.get_contract_source(contract_address)
+                # Get source code from chain explorer
+                contract_data = self.get_contract_source(contract_address, chain)
                 if contract_data.get('status') == '1':
                     item = contract_data['result'][0]
                     source_code = item.get('SourceCode', '')
@@ -224,6 +415,9 @@ class ComprehensiveContractAnalyzer:
                         'optimization_used': item.get('OptimizationUsed', 'Unknown'),
                         'runs': item.get('Runs', 0)
                     })
+                # Fetch historical data if address provided
+                tx_count = self.get_transaction_count(contract_address, chain)
+                results['historical_data'] = {'transaction_count': tx_count, 'chain': chain}
             elif source_code:
                 # For direct source code analysis
                 results.update({
@@ -232,6 +426,11 @@ class ComprehensiveContractAnalyzer:
                     'optimization_used': 'Unknown',
                     'runs': 0
                 })
+                if contract_address:
+                    tx_count = self.get_transaction_count(contract_address, chain)
+                    results['historical_data'] = {'transaction_count': tx_count, 'chain': chain}
+                else:
+                    results['historical_data'] = {'transaction_count': 0, 'chain': chain}
 
             if not source_code:
                 self.logger.error("No source code available for analysis")
@@ -304,6 +503,90 @@ class ComprehensiveContractAnalyzer:
                     results['optimization_used'] = 'Unknown'
                     results['runs'] = 0
                 
+                # Detect proxy patterns and upgradeability
+                results['upgradeable_analysis'] = {
+                    'is_proxy': False,
+                    'proxy_type': 'None',
+                    'upgrade_safety_score': 10.0,  # Default safe
+                    'storage_collision_risk': False,
+                    'issues': []
+                }
+                
+                if hasattr(contract, 'is_proxy'):
+                    if contract.is_proxy:
+                        results['upgradeable_analysis']['is_proxy'] = True
+                        results['upgradeable_analysis']['proxy_type'] = 'UUPS or Transparent'  # Initial general detection
+                        results['upgradeable_analysis']['upgrade_safety_score'] -= 3.0  # Base penalty for proxies
+                        
+                        # Check for Transparent Proxy specific issues
+                        transparent_detector = slither.register_detector('TransparentProxyAdminNoControl')
+                        if transparent_detector:
+                            transparent_issues = transparent_detector.detect()
+                            if transparent_issues:
+                                results['upgradeable_analysis']['proxy_type'] = 'Transparent'
+                                results['upgradeable_analysis']['issues'].extend([{
+                                    'title': issue.title,
+                                    'description': issue.description,
+                                    'severity': 'High',
+                                    'lines': issue.lines
+                                } for issue in transparent_issues])
+                                results['upgradeable_analysis']['upgrade_safety_score'] -= 3.0 * len(transparent_issues)
+                        
+                        # Check for UUPS Proxy specific issues
+                        uups_detector = slither.register_detector('UUPSChildAdminRights')
+                        if uups_detector:
+                            uups_issues = uups_detector.detect()
+                            if uups_issues:
+                                results['upgradeable_analysis']['proxy_type'] = 'UUPS'
+                                results['upgradeable_analysis']['issues'].extend([{
+                                    'title': issue.title,
+                                    'description': issue.description,
+                                    'severity': 'High',
+                                    'lines': issue.lines
+                                } for issue in uups_issues])
+                                results['upgradeable_analysis']['upgrade_safety_score'] -= 3.0 * len(uups_issues)
+                        
+                        # Fallback to unprotected upgradeable contract
+                        unprotected_upgrade = slither.register_detector('UnprotectedUpgradeableContract')
+                        if unprotected_upgrade:
+                            issues = unprotected_upgrade.detect()
+                            if issues:
+                                results['upgradeable_analysis']['issues'].extend([{
+                                    'title': issue.title,
+                                    'description': issue.description,
+                                    'severity': 'High',
+                                    'lines': issue.lines
+                                } for issue in issues])
+                                results['upgradeable_analysis']['upgrade_safety_score'] -= 4.0 * len(issues)
+                                results['upgradeable_analysis']['storage_collision_risk'] = True
+                        
+                        # Additional check for storage layout issues (simplified)
+                        if len(contract.state_variables) > 10:  # Heuristic for complexity
+                            results['upgradeable_analysis']['storage_collision_risk'] = True
+                            results['upgradeable_analysis']['issues'].append({
+                                'title': 'Potential Storage Collision Risk',
+                                'description': 'Proxy contracts with many state variables may risk slot collisions during upgrades.',
+                                'severity': 'Medium',
+                                'lines': []
+                            })
+                            results['upgradeable_analysis']['upgrade_safety_score'] -= 2.0
+                
+                # Clamp score
+                results['upgradeable_analysis']['upgrade_safety_score'] = max(0.0, min(10.0, results['upgradeable_analysis']['upgrade_safety_score']))
+                
+                # Extract features for preprocessing
+                preprocessing_features = self._extract_features(contract)
+                results['preprocessing'] = preprocessing_features
+                
+                # Expand tokenization with feature metadata in ML analysis
+                if 'ml_analysis' in results and not results['ml_analysis'].get('error'):
+                    results['ml_analysis']['features_extracted'] = {
+                        'num_functions': len(preprocessing_features['functions']),
+                        'num_state_vars': len(preprocessing_features['state_variables']),
+                        'num_modifiers': len(preprocessing_features['modifiers']),
+                        'num_loops': preprocessing_features['loops']
+                    }
+                
                 # Analyze gas optimization
                 try:
                     gas_results = self.gas_optimizer.analyze(contract)
@@ -341,47 +624,165 @@ class ComprehensiveContractAnalyzer:
             self.logger.error(f"Error initializing Slither or analyzing contract: {e}")
             return {'error': f'Error analyzing contract: {str(e)}'}
 
-        # Run CodeBERT analysis
-
-    def get_contract_source(self, address: str) -> dict:
-        if not address.startswith('0x') or len(address) != 42:
-            raise ValueError("Invalid Ethereum address")
-
-        if not self.etherscan_api_key:
-            raise ValueError("ETHERSCAN_API_KEY not configured")
-
+                # Run CodeBERT analysis
         try:
-            # Mask API key in logs
-            masked = f"{self.etherscan_api_key[:4]}***{self.etherscan_api_key[-4:]}"
-            # V2 API pattern uses /v2/api with module/action and requires chainid
-            # Default to Ethereum mainnet (chainid=1)
-            log_url = (
-                f"https://api.etherscan.io/v2/api?module=contract&action=getsourcecode"
-                f"&address={address}&chainid=1&apikey={masked}"
-            )
-            self.logger.info(f"Request URL: {log_url}")
+            ml_results = self._run_codebert_analysis(source_code)
+            results['ml_analysis'] = ml_results
 
-            # Actual request with full key
+            # Compute ml_score (0-10, higher more vulnerable)
+            if ml_results.get('predicted_class') == 1:
+                ml_confidence = ml_results.get('confidence_scores', [0, 0])[1]
+                ml_score = ml_confidence * 10
+            else:
+                ml_score = 0.0
+            results['ml_score'] = round(ml_score, 2)
+        except Exception as e:
+            self.logger.error(f"Error in ML analysis: {e}")
+            results['ml_analysis'] = {'error': str(e)}
+            results['ml_score'] = 0.0
+
+        # Run Mythril analysis
+        try:
+            mythril_results = self.mythril_analyzer.analyze(source_path)
+            results['mythril_analysis'] = mythril_results
+            mythril_score = mythril_results.get('score', 0.0)
+            results['mythril_score'] = round(mythril_score, 2)
+        except Exception as e:
+            self.logger.error(f"Error in Mythril analysis: {e}")
+            results['mythril_analysis'] = {'error': str(e)}
+            results['mythril_score'] = 0.0
+
+        # Compute slither_score based on severity counts (after Slither analysis)
+        slither_summary = results['static_analysis']['summary']
+        slither_score = (
+            slither_summary.get('high', 0) * 4.0 +
+            slither_summary.get('medium', 0) * 2.0 +
+            slither_summary.get('low', 0) * 0.5 +
+            slither_summary.get('informational', 0) * 0.1
+        )
+        results['slither_score'] = round(slither_score, 2)
+
+        # Compute weighted overall_score (0-10 scale)
+        weights = {'slither': 0.4, 'ml': 0.3, 'mythril': 0.3}
+        overall_score = (
+            weights['slither'] * results['slither_score'] +
+            weights['ml'] * results['ml_score'] +
+            weights['mythril'] * results['mythril_score']
+        )
+        results['overall_score'] = round(overall_score, 2)
+
+        # Combine vulnerabilities from Slither and Mythril
+        slither_vulns = results['static_analysis'].get('detectors', [])
+        mythril_vulns = results['mythril_analysis'].get('vulnerabilities', [])
+        results['vulnerabilities'] = slither_vulns + mythril_vulns
+
+        # Add mythril severities to summary
+        if 'mythril_analysis' in results and 'severity_counts' in results['mythril_analysis']:
+            myth_sev = results['mythril_analysis']['severity_counts']
+            for sev in myth_sev:
+                results['static_analysis']['summary'][sev] = results['static_analysis']['summary'].get(sev, 0) + myth_sev[sev]
+
+        # Generate summary
+        self._generate_summary(results)
+        self._compute_trust_risk_score(results)
+        return results
+
+    def get_contract_source(self, address: str, chain: str) -> dict:
+        if chain not in self.api_bases:
+            raise ValueError(f"Unsupported chain: {chain}. Supported: {list(self.api_bases.keys())}")
+        base_url = self.api_bases[chain]
+        api_key = self.api_keys.get(chain)
+        if not api_key:
+            raise ValueError(f"API key not configured for {chain}. Set {'ETHERSCAN_API_KEY' if chain == 'ethereum' else f'{chain.upper()}SCAN_API_KEY'} environment variable.")
+        if not address.startswith('0x') or len(address) != 42:
+            raise ValueError("Invalid EVM address")
+        try:
+            masked = f"{api_key[:4]}***{api_key[-4:]}"
+            chain_id = self.chain_ids[chain]
+            log_url = f"{base_url}/v2/api?module=contract&action=getsourcecode&address={address}&chainid={chain_id}&apikey={masked}"
+            self.logger.info(f"Request URL for {chain}: {log_url}")
+            url = f"{base_url}/v2/api?module=contract&action=getsourcecode&address={address}&chainid={chain_id}&apikey={api_key}"
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            if str(data.get('status')) == '1' and str(data.get('message')).upper() == 'OK' and isinstance(data.get('result'), dict):
+                result = data['result']
+                return {'status': '1', 'message': 'OK', 'result': [result]}
+            if str(data.get('message')).upper() == 'NOTOK':
+                raise Exception(f"{chain.capitalize()}Scan V2 API error: {data.get('result', 'Unknown error')}")
+            raise Exception(f"Unexpected {chain.capitalize()}Scan V2 response: {data}")
+        except Exception as e:
+            self.logger.error(f"Error fetching contract source for {chain}: {e}")
+            raise
+
+    def get_transaction_count(self, address: str, chain: str) -> int:
+        """Fetch approximate transaction count from chain explorer."""
+        if chain not in self.api_bases:
+            self.logger.warning(f"Unsupported chain {chain}; cannot fetch transaction count.")
+            return 0
+        base_url = self.api_bases[chain]
+        api_key = self.api_keys.get(chain)
+        if not api_key:
+            self.logger.warning(f"No API key for {chain}; cannot fetch transaction count.")
+            return 0
+        if not address.startswith('0x') or len(address) != 42:
+            self.logger.warning("Invalid address format")
+            return 0
+        try:
             url = (
-                f"https://api.etherscan.io/v2/api?module=contract&action=getsourcecode"
-                f"&address={address}&chainid=1&apikey={self.etherscan_api_key}"
+                f"{base_url}/api?"
+                f"module=account&action=txlist&"
+                f"address={address}&startblock=0&endblock=99999999&"
+                f"page=1&offset=10000&sort=asc&"
+                f"apikey={api_key}"
             )
             response = requests.get(url, timeout=30)
             response.raise_for_status()
             data = response.json()
-
-            # Normalize to V1-like structure expected by existing callers
-            if str(data.get('status')) == '1' and str(data.get('message')).upper() == 'OK' and isinstance(data.get('result'), dict):
-                result = data['result']
-                # Wrap into a list to mimic V1 shape
-                return {'status': '1', 'message': 'OK', 'result': [result]}
-
-            # Handle NOTOK
-            if str(data.get('message')).upper() == 'NOTOK':
-                raise Exception(f"Etherscan V2 API error: {data.get('result', 'Unknown error')}\nURL: {url}")
-
-            raise Exception(f"Unexpected Etherscan V2 response: {data}\nURL: {url}")
-
+            if data.get('status') == '1':
+                return len(data.get('result', []))
+            else:
+                self.logger.warning(f"Failed to fetch tx count for {chain}: {data.get('message', 'Unknown')}")
+                return 0
         except Exception as e:
-            self.logger.error(f"Error fetching contract source (V2): {e}")
-            raise
+            self.logger.error(f"Error fetching transaction count for {chain}: {e}")
+            return 0
+
+    def _compute_trust_risk_score(self, results: Dict[str, Any]) -> None:
+        """Compute ensemble risk score and reputation index."""
+        if 'historical_data' not in results:
+            results['historical_data'] = {'transaction_count': 0}
+
+        # Security risk from overall score (0-100, higher = riskier)
+        security_risk = results.get('overall_score', 0) * 10
+
+        # Gas risk: higher savings indicate poorer optimization (arbitrary scaling)
+        gas_savings = results.get('gas_optimization', {}).get('estimated_savings', 0)
+        gas_risk = min(30, gas_savings / 5000)
+
+        # Historical risk: lower tx count indicates less tested (higher risk)
+        tx_count = results['historical_data']['transaction_count']
+        historical_risk = 25 if tx_count == 0 else 15 if tx_count < 100 else 5 if tx_count < 1000 else 0
+
+        # Weighted ensemble risk score
+        risk_score = 0.7 * security_risk + 0.15 * gas_risk + 0.15 * historical_risk
+        risk_score = min(100, max(0, risk_score))
+
+        # Reputation index (higher = better)
+        reputation_index = max(0, 100 - risk_score)
+
+        results['trust_risk_scoring'] = {
+            'risk_score': round(risk_score, 2),
+            'reputation_index': round(reputation_index, 2),
+            'explanation': (
+                f"Risk score combines security ({round(security_risk, 2)}), "
+                f"gas optimization ({round(gas_risk, 2)}), "
+                f"and historical activity ({historical_risk})."
+            ),
+            'components': {
+                'security_risk': round(security_risk, 2),
+                'gas_risk': round(gas_risk, 2),
+                'historical_risk': historical_risk,
+                'transaction_count': tx_count
+            }
+        }

@@ -5,6 +5,7 @@ pandas>=2.2.3
 numpy>=1.24.0
 scikit-learn>=1.6.1
 requests>=2.32.3
+mythril
 python-dotenv>=1.1.0
 pydantic>=2.11.4
 

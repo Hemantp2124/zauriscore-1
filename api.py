@@ -3,6 +3,10 @@ from pydantic import BaseModel
 import torch
 import numpy as np
 from transformers import AutoTokenizer
+import json
+import logging
+from zauriscore.analyzers.comprehensive_contract_analysis import ComprehensiveContractAnalyzer
+from check_etherscan import get_contract_source_code, EtherscanClient, EtherscanConfig
 
 app = FastAPI()
 
@@ -18,6 +22,20 @@ tokenizer = AutoTokenizer.from_pretrained('microsoft/codebert-base')
 class PredictionRequest(BaseModel):
     source_code: str
     structured_features: dict = None
+
+# New request model for contract analysis
+class ContractAnalysisRequest(BaseModel):
+    contract_address: str
+    api_key: str = None  # Etherscan API key, optional if set in config
+
+# Etherscan config - assume API key from env or default
+config = EtherscanConfig(
+    api_key=os.getenv('ETHERSCAN_API_KEY', 'YourApiKeyToken')  # Replace with actual key handling
+)
+client = EtherscanClient(config)
+
+# Initialize analyzer
+analyzer = ComprehensiveContractAnalyzer()
 
 # Explanation models
 import shap
@@ -52,3 +70,55 @@ def predict(request: PredictionRequest):
         'risk_score': prediction.item(),
         'shap_values': shap_values.tolist()
     }
+
+@app.post('/analyze')
+def analyze_contract(request: ContractAnalysisRequest):
+    """
+    Analyze smart contract: Fetch from Etherscan, run Slither/Mythril/ML, compute weighted risk, return JSON.
+    """
+    try:
+        contract_address = request.contract_address
+
+        # Step 1: Fetch contract source
+        source_result = get_contract_source_code(client, contract_address)
+        if not source_result:
+            raise HTTPException(status_code=404, detail="Contract source not found")
+
+        # Extract source code (handle multi-file)
+        source_code = source_result.get('SourceCode', '')
+        if source_code.startswith('{{'):
+            # Multi-file JSON
+            source_json = json.loads(source_code[1:-1])  # Remove outer braces if needed
+            # For simplicity, concatenate files or use first; in production, handle properly
+            concatenated_source = '\n'.join([
+                content.get('content', '') for content in source_json.get('sources', {}).values()
+            ])
+        else:
+            concatenated_source = source_code
+
+        # Step 2: Run analysis (Slither, Mythril, etc. via analyzer)
+        analysis_result = analyzer.analyze_contract(
+            contract_address=contract_address,
+            source_code=concatenated_source  # Pass fetched source
+        )
+
+        # Step 3: Compute weighted risk (example: combine static findings and ML score)
+        # Assume analysis_result has 'slither_issues', 'mythril_issues', 'ml_score'
+        static_score = len(analysis_result.get('security_issues', [])) * 0.4  # Heuristic
+        ml_score = analysis_result.get('codebert_analysis', {}).get('vulnerable_probability', 0) * 0.6
+        weighted_risk = (static_score + ml_score) / 2  # Weighted average; adjust as needed
+
+        # Step 4: Prepare JSON response
+        response = {
+            'contract_address': contract_address,
+            'analysis_results': analysis_result,
+            'weighted_risk_score': weighted_risk,
+            'timestamp': analysis_result.get('analysis_timestamp', ''),
+            'recommendations': [issue.get('recommendation', '') for issue in analysis_result.get('security_issues', []) if issue.get('recommendation')]
+        }
+
+        return response
+
+    except Exception as e:
+        logging.error(f"Analysis error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

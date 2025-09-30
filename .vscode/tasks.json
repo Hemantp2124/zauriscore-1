@@ -1,0 +1,17 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "npm",
+			"script": "prepack",
+			"path": "src/zauriscore/data/contracts/external/openzeppelin_contracts",
+			"problemMatcher": [],
+			"label": "npm: prepack - src/zauriscore/data/contracts/external/openzeppelin_contracts",
+			"detail": "bash ../scripts/prepack.sh",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			}
+		}
+	]
+}
