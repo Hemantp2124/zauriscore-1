@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -474,6 +475,145 @@ def normalize_score(score: float, min_score: float = -100.0, max_score: float = 
     
     # Normalize to 0-100 range
     return ((score - min_score) / (max_score - min_score)) * 100# Clamp between 0 and 100
+
+
+class HeuristicAnalyzer:
+    """Main class for heuristic-based smart contract analysis."""
+
+    def __init__(self, model_path: str = 'microsoft/codebert-base') -> None:
+        """
+        Initialize the HeuristicAnalyzer.
+        
+        Args:
+            model_path: Path to the pre-trained ML model.
+        """
+        self.weights = HEURISTIC_POINTS
+        if ML_DEPENDENCIES_AVAILABLE:
+            self.ml = MLVulnerabilityWeightCalculator(model_path)
+        else:
+            self.ml = None
+        self.logger = logger
+
+    def analyze(self, contract_code: str, main_source_unit_name: str = "MainContract.sol") -> Dict[str, Any]:
+        """
+        Analyze the smart contract using heuristics, Slither, and ML.
+        
+        Args:
+            contract_code: The Solidity source code.
+            main_source_unit_name: Name of the main source file.
+            
+        Returns:
+            Dict containing analysis results, score, and findings.
+        """
+        findings = []
+        score = 0.0
+        economic_risk = 'unknown'
+        
+        # Run Slither analysis
+        slither_results = run_slither(contract_code, main_source_unit_name)
+        if slither_results.get('success'):
+            detectors = slither_results.get('results', {}).get('detectors', [])
+            for detector in detectors:
+                check_type = detector.get('check', '')
+                impact = detector.get('impact', 'Medium')
+                findings.append({
+                    'type': 'slither',
+                    'check': check_type,
+                    'impact': impact,
+                    'description': detector.get('description', ''),
+                    'confidence': detector.get('confidence', 'Medium')
+                })
+                # Adjust score based on detector type (simplified)
+                if 'reentrancy' in check_type:
+                    score += self.weights['reentrancy_guard_absent']
+                elif 'selfdestruct' in check_type:
+                    score += self.weights['owner_selfdestruct']
+                elif 'access' in check_type:
+                    score += self.weights['access_control_absent']
+                else:
+                    score -= 5  # Generic penalty
+        else:
+            findings.append({
+                'type': 'slither',
+                'error': slither_results.get('error', 'Slither analysis failed')
+            })
+        
+        # ML-based vulnerability assessment
+        if self.ml:
+            similarities = self.ml.calculate_code_vulnerability_similarity(contract_code)
+            for vuln_type, similarity in similarities.items():
+                if similarity > 0.5:
+                    findings.append({
+                        'type': 'ml',
+                        'vulnerability': vuln_type,
+                        'similarity': similarity,
+                        'description': f'High similarity to {vuln_type} patterns'
+                    })
+                    score -= 10 * similarity
+            economic_risk = self.ml.assess_economic_risk(contract_code)
+            score += self.weights.get(economic_risk, 0)
+        
+        # Basic heuristic checks on code
+        if re.search(r'\bReentrancyGuard\b', contract_code):
+            score += self.weights['reentrancy_guard_present']
+            findings.append({
+                'type': 'heuristic',
+                'check': 'reentrancy_guard_present',
+                'description': 'ReentrancyGuard detected'
+            })
+        if re.search(r'\bowner\s*\.\s*selfdestruct', contract_code, re.IGNORECASE):
+            score += self.weights['owner_selfdestruct']
+            findings.append({
+                'type': 'heuristic',
+                'check': 'owner_selfdestruct',
+                'description': 'Owner-controlled selfdestruct detected (negative)'
+            })
+        if re.search(r'\s*\*\s*', contract_code):
+            score += self.weights['natspec_present']
+            findings.append({
+                'type': 'heuristic',
+                'check': 'natspec_present',
+                'description': 'NatSpec documentation detected'
+            })
+        if not re.search(r'\bcall\b|\bdelegatecall\b|\bstaticcall\b', contract_code):
+            score += self.weights['no_external_calls']
+            findings.append({
+                'type': 'heuristic',
+                'check': 'no_external_calls',
+                'description': 'No low-level external calls detected'
+            })
+        
+        # Normalize score
+        normalized_score = normalize_score(score)
+        
+        return {
+            'score': normalized_score,
+            'raw_score': score,
+            'findings': findings,
+            'slither_results': slither_results,
+            'economic_risk': economic_risk,
+            'success': slither_results.get('success', False)
+        }
+
+    def analyze_with_mythril(self, contract_path: str) -> dict:
+        """Run Mythril analysis using Docker."""
+        try:
+            cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{Path(contract_path).parent.absolute()}:/tmp",
+                "mythril/myth",
+                "analyze", f"/tmp/{Path(contract_path).name}",
+                "--output", "json"
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                return json.loads(result.stdout)
+            else:
+                return {"error": result.stderr, "success": False}
+                
+        except Exception as e:
+            return {"error": str(e), "success": False}
 
 
 def test_heuristic_analyzer() -> None:

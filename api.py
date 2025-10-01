@@ -28,10 +28,11 @@ class ContractAnalysisRequest(BaseModel):
     contract_address: str
     api_key: str = None  # Etherscan API key, optional if set in config
 
-# Etherscan config - assume API key from env or default
-config = EtherscanConfig(
-    api_key=os.getenv('ETHERSCAN_API_KEY', 'YourApiKeyToken')  # Replace with actual key handling
-)
+# Etherscan config - require API key from env
+api_key = os.getenv('ETHERSCAN_API_KEY')
+if not api_key:
+    raise ValueError("ETHERSCAN_API_KEY environment variable is required")
+config = EtherscanConfig(api_key=api_key)
 client = EtherscanClient(config)
 
 # Initialize analyzer

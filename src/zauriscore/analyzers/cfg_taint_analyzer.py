@@ -1,14 +1,10 @@
 # CFG and Taint Analyzer for Solidity Contracts
 
-import slither
-
-from slither.core.cfg import Node
-from slither.slithir.operations import LibraryCall, InternalCall
-from slither.slithir.variables import Constant
+from typing import Any, Dict, List, Tuple
 
 import json
 import networkx as nx
-from typing import Dict, List, Tuple
+from .slither_utils import SlitherUtils
 
 class CFGTAintAnalyzer:
     """
@@ -16,12 +12,10 @@ class CFGTAintAnalyzer:
     on Solidity contracts using Slither. Integrates with ML models for feature extraction.
     """
 
-    def __init__(self, contract_path: str):
-        """
-        Initialize the analyzer with the contract file path.
-        :param contract_path: Path to the Solidity contract file.
-        """
-        self.slither = slither.Slither(contract_path)
+    def __init__(self, contract_path: str, contract_name: str = None):
+        self.contract_path = contract_path
+        self.contract_name = contract_name
+        self.slither = SlitherUtils.init_slither(contract_path)
         self.cfg_graphs: Dict[str, nx.DiGraph] = {}
         self.taint_results: Dict[str, List[str]] = {}
 
@@ -30,57 +24,15 @@ class CFGTAintAnalyzer:
         Extract Control Flow Graphs for all functions in the contract.
         :return: Dictionary of function names to their CFG graphs.
         """
-        for contract in self.slither.contracts:
-            for function in contract.functions_declared:
-                func_name = f"{contract.name}.{function.full_name}"
-                graph = nx.DiGraph()
-
-                # Build CFG nodes and edges
-                for node in function.nodes:
-                    graph.add_node(node.node_id, statement=str(node.expression), lineno=node.source_mapping.lineno)
-
-                for node in function.nodes:
-                    for son in node.sons:
-                        graph.add_edge(node.node_id, son.node_id)
-
-                self.cfg_graphs[func_name] = graph
-
+        self.cfg_graphs = SlitherUtils().extract_cfg(self.slither)
         return self.cfg_graphs
 
-    def perform_taint_analysis(self) -> Dict[str, List[str]]:
+    def perform_taint_analysis(self) -> Dict[str, List[Dict[str, Any]]]:
         """
         Perform taint analysis to track data flows from user inputs to sensitive operations.
-        :return: Dictionary of function names to tainted paths.
+        :return: Dictionary of function names to list of tainted operations.
         """
-        taint_paths = {}
-
-        for contract in self.slither.contracts:
-            for function in contract.functions_declared:
-                func_name = f"{contract.name}.{function.full_name}"
-                tainted_vars = set()
-                tainted_operations = []
-
-                # Simple taint propagation: track user inputs (msg.sender, msg.value, etc.)
-                for node in function.nodes:
-                    if isinstance(node.expression, LibraryCall) and 'msg.sender' in str(node.expression) or 'msg.value' in str(node.expression):
-                        tainted_vars.add(str(node.expression))
-
-                    # Propagate taint through assignments and calls
-                    if node.expression and '=' in str(node.expression):
-                        if any(var in str(node.expression) for var in tainted_vars):
-                            tainted_vars.add(str(node.expression.split('=')[0].strip()))
-
-                    # Detect taint reaching sensitive ops (e.g., transfers, calls)
-                    if isinstance(node.expression, (LibraryCall, InternalCall)) and any(sens in str(node.expression) for sens in ['transfer', 'send', 'call', 'delegatecall']):
-                        if any(var in str(node.expression) for var in tainted_vars):
-                            tainted_operations.append({
-                                'node_id': node.node_id,
-                                'operation': str(node.expression),
-                                'tainted_from': list(tainted_vars)
-                            })
-
-                self.taint_results[func_name] = tainted_operations
-
+        self.taint_results = SlitherUtils().perform_basic_taint_analysis(self.slither)
         return self.taint_results
 
     def generate_features_for_ml(self) -> Dict[str, Dict]:
@@ -109,6 +61,33 @@ class CFGTAintAnalyzer:
 
         return features
 
+    def analyze_contract(self, contract_address: str, source_code: str) -> Dict[str, Any]:
+        """
+        Perform full analysis: CFG extraction, taint analysis, ML features, and compute vulnerability score.
+        :param contract_address: Ethereum contract address.
+        :param source_code: Solidity source code.
+        :return: Comprehensive analysis results including vulnerability score.
+        """
+        self.source_code = source_code  # Store source for potential use
+
+        cfg_graphs = self.extract_cfg()
+        taint_results = self.perform_taint_analysis()
+        ml_features = self.generate_features_for_ml()
+
+        # Simple vulnerability score based on taint density and graph complexity
+        total_taint_ops = sum(len(taints) for taints in taint_results.values())
+        total_nodes = sum(graph.number_of_nodes() for graph in cfg_graphs.values())
+        vulnerability_score = (total_taint_ops / total_nodes) if total_nodes > 0 else 0
+        vulnerability_score *= 10  # Scale to 0-10
+
+        return {
+            'cfg_graphs': cfg_graphs,
+            'taint_results': taint_results,
+            'ml_features': ml_features,
+            'vulnerability_score': vulnerability_score,
+            'contract_address': contract_address
+        }
+
     def save_analysis_results(self, output_path: str):
         """
         Save CFG graphs, taint results, and ML features to JSON.
@@ -123,9 +102,10 @@ class CFGTAintAnalyzer:
         with open(output_path, 'w') as f:
             json.dump(results, f, indent=2)
 
+
 # Example usage
 if __name__ == "__main__":
-    analyzer = CFGTAintAnalyzer("path/to/contract.sol")
+    analyzer = CFGTAintAnalyzer("path/to/contract.sol", "MyContract")
     analyzer.extract_cfg()
     analyzer.perform_taint_analysis()
     features = analyzer.generate_features_for_ml()

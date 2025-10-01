@@ -8,13 +8,16 @@ from slither.core.expressions.expression import Expression
 import logging
 import tempfile
 import os
+import json
 
 class GasOptimizationAnalyzer:
     def __init__(self):
         self.optimizations = []
 
     def analyze_storage_packing(self, contract: Contract) -> List[Dict[str, Any]]:
-        """Analyze storage packing opportunities."""
+        """
+        Analyze storage packing opportunities.
+        """
         optimizations = []
         
         # Group state variables by their storage slot
@@ -25,7 +28,7 @@ class GasOptimizationAnalyzer:
                 if slot not in storage_slots:
                     storage_slots[slot] = []
                 storage_slots[slot].append(var)
-
+        
         # Check for storage packing opportunities
         for slot, vars_in_slot in storage_slots.items():
             if len(vars_in_slot) > 1:
@@ -39,7 +42,7 @@ class GasOptimizationAnalyzer:
                         can_pack = False
                         break
                     total_size += var_size
-
+                
                 if can_pack and total_size <= 32:
                     optimizations.append({
                         'issue': 'Storage Packing Opportunity',
@@ -53,15 +56,16 @@ class GasOptimizationAnalyzer:
                                         '\n'.join([f'{v.type} {v.name};' for v in vars_in_slot]),
                         'rationale': 'Multiple small variables can be packed into a single storage slot to save gas'
                     })
-
+        
         return optimizations
 
     def analyze(self, contract: Union[Contract, str]) -> List[Dict[str, Any]]:
-        """Analyze a contract for gas optimization opportunities.
+        """
+        Analyze a contract for gas optimization opportunities.
         
         Args:
             contract: Either a Slither Contract object or a string containing Solidity source code
-            
+        
         Returns:
             List of optimization opportunities
         """
@@ -107,12 +111,14 @@ class GasOptimizationAnalyzer:
         # If input is already a Contract object
         elif isinstance(contract, Contract):
             return self.analyze_contract(contract)
-            
+        
         else:
             raise ValueError("Input must be either a Solidity source code string or a Slither Contract object")
     
     def analyze_contract(self, contract: Contract) -> List[Dict[str, Any]]:
-        """Analyze a single contract for all gas optimizations."""
+        """
+        Analyze a single contract for all gas optimizations.
+        """
         optimizations = []
         optimizations.extend(self.analyze_storage_packing(contract))
         optimizations.extend(self.analyze_public_mappings(contract))
@@ -123,7 +129,9 @@ class GasOptimizationAnalyzer:
         return optimizations
     
     def analyze_solidity_source(self, source_code: str) -> List[Dict[str, Any]]:
-        """Analyze Solidity source code using string matching when Slither parsing fails."""
+        """
+        Analyze Solidity source code using string matching when Slither parsing fails.
+        """
         optimizations = []
         
         # Check for public mappings
@@ -137,67 +145,8 @@ class GasOptimizationAnalyzer:
                 'matched_code': 'mapping(...) public ...',
                 'example_before': 'mapping(...) public name;',
                 'example_after': 'mapping(...) private _name;\n\n    function getName(...) public view returns (...) {\n        return _name[...];\n    }',
-                'rationale': 'Public mappings generate an implicit getter function. Using a private mapping with an explicit getter can save gas.'
+                'rationale': 'Public mappings generate an implicit getter function that can be expensive. Making it private with an explicit getter can save gas.'
             })
-        
-        # Check for struct packing opportunities
-        if 'struct' in source_code and '}' in source_code.split('struct')[-1]:
-            optimizations.append({
-                'issue': 'Struct Packing Opportunity',
-                'severity': 'medium',
-                'suggestion': 'Reorganize struct fields to use fewer storage slots',
-                'saving': '~2000-5000 gas per slot saved',
-                'category': 'storage',
-                'matched_code': 'struct ... { ... }',
-                'example_before': 'struct Example {\n    bool active;\n    uint256 id;\n    address user;\n    uint8 age;\n}',
-                'example_after': 'struct Example {\n    uint256 id;\n    address user;\n    bool active;\n    uint8 age;\n}',
-                'rationale': 'Reordering struct fields can reduce the number of storage slots used, saving gas.'
-            })
-        
-        # Check for multiple small uints that could be packed
-        if ('uint8' in source_code or 'uint16' in source_code or 'uint32' in source_code) and \
-           ('uint256' in source_code or 'uint128' in source_code):
-            optimizations.append({
-                'issue': 'Multiple Small Uints',
-                'severity': 'medium',
-                'suggestion': 'Group smaller uints together to save storage slots',
-                'saving': '~2000-5000 gas per slot saved',
-                'category': 'storage',
-                'matched_code': 'uint8/uint16/uint32 variables',
-                'example_before': 'uint8 a;\nuint256 b;\nuint8 c;',
-                'example_after': 'uint8 a;\nuint8 c;\nuint256 b;',
-                'rationale': 'Grouping smaller uints together can reduce the number of storage slots used.'
-            })
-        
-        # Check for dynamic bytes arrays
-        if 'bytes ' in source_code and '=' in source_code.split('bytes ')[-1] and 'new bytes' in source_code:
-            optimizations.append({
-                'issue': 'Dynamic Bytes Array',
-                'severity': 'medium',
-                'suggestion': 'Use fixed-size bytes (bytes1 to bytes32) instead of dynamic bytes if the maximum size is known',
-                'saving': '~20000 gas for storage, ~100 gas per access',
-                'category': 'storage',
-                'matched_code': 'bytes public name = new bytes(...);',
-                'example_before': 'bytes public data = new bytes(20);',
-                'example_after': 'bytes20 public data;  // If max size is 20 bytes',
-                'rationale': 'Fixed-size bytes are more gas-efficient than dynamic bytes arrays.'
-            })
-        
-        # Check for mapping initialization
-        if 'mapping(' in source_code and '=' in source_code.split('mapping(')[-1] and '{' in source_code:
-            optimizations.append({
-                'issue': 'Mapping with Initial Value',
-                'severity': 'low',
-                'suggestion': 'Initialize mappings in the constructor instead of at declaration',
-                'saving': '~20000 gas per mapping',
-                'category': 'deployment',
-                'matched_code': 'mapping(...) public name = { ... };',
-                'example_before': 'mapping(address => bool) public whitelist = {\n    0x123...: true\n};',
-                'example_after': 'mapping(address => bool) public whitelist;\n\n    constructor() {\n        whitelist[0x123...] = true;\n    }',
-                'rationale': 'Initializing mappings in the constructor is more gas-efficient than at declaration.'
-            })
-        
-        return optimizations
 
     def analyze_public_mappings(self, contract: Contract) -> List[Dict[str, Any]]:
         """Detect public mappings that could be made private."""

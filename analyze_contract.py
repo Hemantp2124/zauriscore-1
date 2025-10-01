@@ -2,6 +2,7 @@ import sys
 import argparse
 import logging
 from zauriscore.analyzers.comprehensive_contract_analysis import ComprehensiveContractAnalyzer
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -62,7 +63,7 @@ def main():
             
             # Get raw source code first
             print("\n[+] Fetching raw contract data from Etherscan...")
-            raw_data = analyzer.get_contract_source(contract_address)
+            raw_data = analyzer.get_contract_source(contract_address, chain='ethereum')
             
             print("\n[+] Raw Data Received:")
             print(f"Status: {raw_data.get('status', 'N/A')}")

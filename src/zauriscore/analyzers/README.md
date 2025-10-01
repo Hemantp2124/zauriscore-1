@@ -6,6 +6,8 @@ This module provides heuristic-based analysis of Solidity smart contracts to ide
 
 - ML-based vulnerability detection using BERT embeddings
 - Integration with Slither for static analysis
+- CFG and taint-flow extraction for enhanced exploit analysis, including graph metrics and taint propagation tracking
+- Numeric feature aggregation from CFG/taint for ML pipeline integration (e.g., taint_ratio, num_nodes, longest_path)
 - Heuristic scoring system for smart contract security assessment
 - Support for both single-file and multi-file contracts
 - Comprehensive test coverage
@@ -56,11 +58,15 @@ Individual checks:
 
 ```python
 from zauriscore.analyzers.heuristic_analyzer import MLVulnerabilityWeightCalculator
+from zauriscore.analyzers.cfg_taint_analyzer import CFGTAintAnalyzer
 
-# Initialize the analyzer
-analyzer = MLVulnerabilityWeightCalculator()
+# Initialize the heuristic analyzer
+heuristic_analyzer = MLVulnerabilityWeightCalculator()
 
-# Analyze a contract
+# Initialize CFG/Taint analyzer
+cfg_analyzer = CFGTAintAnalyzer()
+
+# Analyze a contract for vulnerabilities
 contract_code = """
 pragma solidity ^0.8.0;
 
@@ -70,22 +76,34 @@ contract SampleContract {
     constructor() {
         owner = msg.sender;
     }
+    
+    function riskyTransfer(address to, uint amount) external {
+        // Potential reentrancy
+        to.call{value: amount}();
+    }
 }
 """
 
 # Get vulnerability similarities
-similarities = analyzer.calculate_code_vulnerability_similarity(contract_code)
-print(similarities)
+similarities = heuristic_analyzer.calculate_code_vulnerability_similarity(contract_code)
+print("Vulnerability similarities:", similarities)
+
+# Get CFG/Taint features
+features = cfg_analyzer.extract_features(contract_code)
+print("CFG/Taint features:", features)
 
 # Assess economic risk
-risk_level = analyzer.assess_economic_risk(contract_code)
+risk_level = heuristic_analyzer.assess_economic_risk(contract_code)
 print(f"Economic risk level: {risk_level}")
 ```
 
 ## Code Structure
 
 - `heuristic_analyzer.py`: Main module with the `MLVulnerabilityWeightCalculator` class and helper functions
-- `tests/test_heuristic_analyzer.py`: Unit tests for the module
+- `cfg_taint_analyzer.py`: Control flow graph extraction and taint-flow analysis using Slither, generating features for vulnerability detection
+- `comprehensive_contract_analysis.py`: Integrated analyzer combining Slither, CodeBERT, and CFG/taint features for enhanced risk scoring
+- Integration with ML pipeline: Features feed into `scripts/feature_extraction.py` and `scripts/train_exploit_fine_tune.py` for CodeBERT fine-tuning with numeric inputs
+- `tests/test_heuristic_analyzer.py`: Unit tests for the module (extend for CFG/taint testing)
 - Configuration files:
   - `.pylintrc`: Pylint configuration
   - `.flake8`: Flake8 configuration

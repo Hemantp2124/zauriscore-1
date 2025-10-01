@@ -6,13 +6,13 @@ import os
 import tempfile
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
-from slither import Slither
+from .slither_utils import SlitherUtils
 from slither.analyses.data_dependency.data_dependency import is_dependent
 from slither.core.declarations import Function, Contract, FunctionContract
 from slither.slithir.operations import HighLevelCall, LowLevelCall, InternalCall
 from slither.slithir.variables import Constant
 from slither.core.variables.state_variable import StateVariable
-from slither.core.cfg.node import Node, WhileNode, ForNode
+from slither.core.cfg.node import Node, NodeType
 from slither.core.expressions.expression import Expression
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -24,7 +24,7 @@ import requests
 
 # Import our analyzers
 from .code_similarity import CodeSimilarityAnalyzer
-from .gas_optimizer import GasOptimizationAnalyzer
+from .gas_optimization_analyzer import GasOptimizationAnalyzer
 from .mythril_analyzer import MythrilAnalyzer
 
 # Load environment variables from .env file
@@ -91,6 +91,7 @@ class ComprehensiveContractAnalyzer:
             'optimism': os.getenv('OPTIMISM_ETHERSCAN_API_KEY')
         }
         self._load_codebert()
+        self.slither_utils = SlitherUtils()
 
     def _load_codebert(self):
         try:
@@ -318,47 +319,7 @@ class ComprehensiveContractAnalyzer:
 
     def _extract_features(self, contract):
         """Extract detailed features from the contract AST using Slither."""
-        features = {
-            'functions': [],
-            'state_variables': [],
-            'modifiers': [],
-            'loops': 0
-        }
-    
-        # Extract functions
-        for func in contract.functions:
-            func_info = {
-                'name': func.name,
-                'visibility': func.visibility,
-                'is_constructor': func.is_constructor,
-                'returns': [ret.type.name if ret.type else 'void' for ret in func.returns],
-                'parameters': [param.type.name if param.type else 'unknown' for param in func.parameters]
-            }
-            features['functions'].append(func_info)
-    
-            # Extract modifiers
-            if func.modifiers:
-                for mod in func.modifiers:
-                    if mod.name not in features['modifiers']:
-                        features['modifiers'].append(mod.name)
-    
-            # Count loops in function body
-            for node in func.nodes:
-                if isinstance(node, (WhileNode, ForNode)):
-                    features['loops'] += 1
-    
-        # Extract state variables (storage)
-        for var in contract.state_variables:
-            var_info = {
-                'name': var.name,
-                'type': var.type.name if var.type else 'unknown',
-                'visibility': var.visibility,
-                'is_constant': var.is_constant,
-                'is_immutable': var.is_immutable
-            }
-            features['state_variables'].append(var_info)
-    
-        return features
+        return self.slither_utils.extract_features(contract)
 
     def analyze_contract(self, contract_address: str = None, source_code: str = None, chain: str = 'ethereum') -> Dict[str, Any]:
         results = {
@@ -486,7 +447,7 @@ class ComprehensiveContractAnalyzer:
             
         # Initialize Slither with the source code
         try:
-            slither = Slither(source_path)
+            slither = self.slither_utils.init_slither(source_path)
             
             # Update contract metadata
             if slither.contracts:
@@ -601,24 +562,23 @@ class ComprehensiveContractAnalyzer:
                     results['gas_optimization']['estimated_savings'] = 0
 
                 # Run Slither detectors
-                for detector in slither.detectors:
+                static_issues = self.slither_utils.run_slither_detectors()
+                for issue_dict in static_issues:
                     try:
-                        issues = detector.detect()
-                        if issues:
-                            severity = detector.IMPACT.title()
-                            results['static_analysis']['summary'][severity.lower()] += len(issues)
-                            results['static_analysis']['detectors'].extend([
-                                {
-                                    'title': issue.title,
-                                    'description': issue.description,
-                                    'severity': severity,
-                                    'impact': detector.IMPACT.title(),
-                                    'confidence': detector.CONFIDENCE.title(),
-                                    'lines': issue.lines
-                                } for issue in issues
-                            ])
+                        impact_str = issue_dict.get('impact', 'LOW')
+                        severity_lower = impact_str.lower()
+                        if severity_lower in results['static_analysis']['summary']:
+                            results['static_analysis']['summary'][severity_lower] += 1
+                        results['static_analysis']['detectors'].append({
+                            'title': issue_dict.get('title', 'Unknown'),
+                            'description': issue_dict.get('description', ''),
+                            'severity': impact_str.title(),
+                            'impact': impact_str,
+                            'confidence': issue_dict.get('confidence', 'MEDIUM'),
+                            'lines': issue_dict.get('lines', [])
+                        })
                     except Exception as e:
-                        self.logger.error(f"Error running detector {detector.__class__.__name__}: {e}")
+                        self.logger.error(f"Error processing detector issue: {e}")
                         continue
         except Exception as e:
             self.logger.error(f"Error initializing Slither or analyzing contract: {e}")

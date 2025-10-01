@@ -10,13 +10,14 @@ from zauriscore.analyzers.comprehensive_contract_analysis import ComprehensiveCo
 from zauriscore.analyzers.mythril_analyzer import MythrilAnalyzer
 from zauriscore.analyzers.gas_optimization_analyzer import GasOptimizationAnalyzer
 
+from zauriscore.analyzers.slither_utils import SlitherUtils
+
 
 class TestComprehensiveContractAnalyzer:
     @pytest.fixture
     def analyzer(self):
         with patch('zauriscore.analyzers.comprehensive_contract_analysis.GasOptimizationAnalyzer') as MockGas, \
-             patch('zauriscore.analyzers.comprehensive_contract_analysis.MythrilAnalyzer') as MockMythril, \
-             patch('zauriscore.analyzers.comprehensive_contract_analysis.Slither'):
+             patch('zauriscore.analyzers.comprehensive_contract_analysis.MythrilAnalyzer') as MockMythril:
             mock_gas = MockGas.return_value
             mock_gas.analyze.return_value = {'gas_score': 0.8, 'optimizations': []}
             
@@ -27,14 +28,19 @@ class TestComprehensiveContractAnalyzer:
                 'summary': 'Mock Mythril summary'
             }
             
-            # Mock Slither
-            mock_slither = Mock()
-            mock_slither.run_detectors.return_value = {'detectors': [], 'slither_score': 0.6}
-            
-            # Mock ML (CodeBERT)
-            with patch('zauriscore.analyzers.comprehensive_contract_analysis.model_from_pretrained'):
+            # Mock transformers for CodeBERT loading
+            with patch('transformers.AutoModelForSequenceClassification.from_pretrained') as mock_model, \
+                 patch('transformers.AutoTokenizer.from_pretrained') as mock_tokenizer:
+                mock_tokenizer.return_value = MagicMock()
+                mock_model.return_value = MagicMock()
+                
                 analyzer = ComprehensiveContractAnalyzer()
-                analyzer.slither = mock_slither
+                # Mock SlitherUtils
+                mock_slither = Mock()
+                mock_slither.contracts = []
+                analyzer.slither_utils.init_slither = Mock(return_value=mock_slither)
+                analyzer.slither_utils.run_slither_detectors = Mock(return_value={'detectors': [], 'slither_score': 0.6})
+                analyzer.slither_utils.extract_features = Mock(return_value={'num_functions': 2, 'num_contracts': 1, 'complexity': 5})
                 analyzer.ml_model = Mock(predict=Mock(return_value=0.75))
                 yield analyzer
 
@@ -125,14 +131,18 @@ class TestComprehensiveContractAnalyzer:
         mock_contract = MagicMock()
         mock_contract.is_proxy = True
         mock_contract.detectors = {'unprotected-upgradeable-contract': {'impact': 'high'}}
-        analyzer.slither.contracts = [mock_contract]
         
         mock_slither = Mock()
+        mock_slither.contracts = [mock_contract]
         mock_slither.run_detectors.return_value = {
             'detectors': [{'name': 'proxy', 'description': 'Transparent proxy detected'}],
             'slither_score': 0.5
         }
-        analyzer.slither = mock_slither
+        analyzer.slither_utils.init_slither.return_value = mock_slither
+        analyzer.slither_utils.run_slither_detectors.return_value = {
+            'detectors': [{'name': 'proxy', 'description': 'Transparent proxy detected'}],
+            'slither_score': 0.5
+        }
         
         result = analyzer.analyze_contract('0xproxy')
         
@@ -148,14 +158,18 @@ class TestComprehensiveContractAnalyzer:
         mock_contract = MagicMock()
         mock_contract.state_variables = ['var1', 'var2', 'var3']  # 3 vars > threshold
         mock_contract.is_upgradeable = True
-        analyzer.slither.contracts = [mock_contract]
         
         mock_slither = Mock()
+        mock_slither.contracts = [mock_contract]
         mock_slither.run_detectors.return_value = {
             'detectors': [{'name': 'unprotected-upgrade', 'impact': 'medium'}],
-            'slither_score': 0.6
+            'sliter_score': 0.6
         }
-        analyzer.slither = mock_slither
+        analyzer.slither_utils.init_slither.return_value = mock_slither
+        analyzer.slither_utils.run_slither_detectors.return_value = {
+            'detectors': [{'name': 'unprotected-upgrade', 'impact': 'medium'}],
+            'sliter_score': 0.6
+        }
         
         # Mock overall_score for trust risk computation
         with patch.object(analyzer, '_compute_weighted_score', return_value=0.7):
@@ -184,7 +198,14 @@ class TestComprehensiveContractAnalyzer:
         mock_contract.is_proxy = True
         mock_contract.is_upgradeable = True
         mock_slither.contracts = [mock_contract]
-        analyzer.slither = mock_slither
+        analyzer.slither_utils.init_slither.return_value = mock_slither
+        analyzer.slither_utils.run_slither_detectors.return_value = {
+            'detectors': [
+                {'name': 'transparent-proxy', 'description': 'Transparent proxy pattern'},
+                {'name': 'uups-proxy', 'description': 'UUPS proxy detected'}
+            ],
+            'slither_score': 0.55
+        }
         
         # Mock other components to focus on new features
         analyzer.mythril_score = 0.7
@@ -284,10 +305,13 @@ class TestComprehensiveContractAnalyzer:
             mock_tx.return_value = 200
             
             # Mock Slither for multi-chain
+            mock_contract = Mock()
+            mock_contract.is_proxy = False
             mock_slither = Mock()
-            mock_slither.contracts[0].is_proxy = False
+            mock_slither.contracts = [mock_contract]
             mock_slither.run_detectors.return_value = {'slither_score': 0.8}
-            analyzer.slither = mock_slither
+            analyzer.slither_utils.init_slither.return_value = mock_slither
+            analyzer.slither_utils.run_slither_detectors.return_value = {'detectors': [], 'slither_score': 0.8}
             
             # Mock other analyzers
             analyzer.ml_score = 0.85
