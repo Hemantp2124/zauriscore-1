@@ -562,7 +562,7 @@ class ComprehensiveContractAnalyzer:
                     results['gas_optimization']['estimated_savings'] = 0
 
                 # Run Slither detectors
-                static_issues = self.slither_utils.run_slither_detectors()
+                static_issues = self.slither_utils.run_slither_detectors(self.slither)
                 for issue_dict in static_issues:
                     try:
                         impact_str = issue_dict.get('impact', 'LOW')

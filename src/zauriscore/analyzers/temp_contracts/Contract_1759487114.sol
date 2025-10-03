@@ -1,0 +1,1 @@
+pragma solidity ^0.8.0; contract Vulnerable { mapping(address=>uint) balances; function withdraw() public { msg.sender.call.value(balances[msg.sender])(); } }

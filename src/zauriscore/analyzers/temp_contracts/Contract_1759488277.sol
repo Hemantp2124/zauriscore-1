@@ -1,0 +1,1 @@
+pragma solidity ^0.8.0; contract Vulnerable { mapping(address=>uint) balances; function withdraw() public { (bool success, ) = msg.sender.call{value: balances[msg.sender]}(""); require(success, "Transfer failed"); balances[msg.sender] = 0; } function deposit() public payable { balances[msg.sender] += msg.value; } }

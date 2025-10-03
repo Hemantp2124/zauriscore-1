@@ -1,0 +1,1 @@
+pragma solidity ^0.8.0; contract Secure { uint public balance; function deposit() public payable { balance += msg.value; } }

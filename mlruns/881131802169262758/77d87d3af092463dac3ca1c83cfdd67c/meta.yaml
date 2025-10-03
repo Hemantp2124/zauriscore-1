@@ -1,0 +1,14 @@
+artifact_uri: file:C:/Users/Lenovo/Desktop/HP/zauriscore-1/mlruns/881131802169262758/77d87d3af092463dac3ca1c83cfdd67c/artifacts
+end_time: 1759487185298
+entry_point_name: ''
+experiment_id: '881131802169262758'
+lifecycle_stage: active
+run_id: 77d87d3af092463dac3ca1c83cfdd67c
+run_name: loud-foal-801
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1759487185280
+status: 4
+tags: []
+user_id: Lenovo

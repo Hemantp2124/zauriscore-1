@@ -9,53 +9,58 @@ import logging
 import tempfile
 import os
 import json
+import slither.core.solidity_types
 
 class GasOptimizationAnalyzer:
     def __init__(self):
         self.optimizations = []
 
     def analyze_storage_packing(self, contract: Contract) -> List[Dict[str, Any]]:
+        optimizations = []
+        for var in contract.state_variables:
+            slot = var.slot  # Changed from var.storage_slot
+            adjacent_slot = contract.get_state_variable_at_slot(slot + 1) if slot is not None else None
+            if adjacent_slot is not None and self.can_pack_variables(var, adjacent_slot):
+                optimizations.append({
+                    'issue': 'Storage Packing Opportunity',
+                    'severity': 'medium',
+                    'suggestion': f'Pack {var.name} with adjacent variable to save storage slots',
+                    'saving': '~20000 gas per slot saved',
+                    'category': 'storage',
+                    'matched_code': str(var.type) + ' ' + var.name + ';',
+                    'example_before': str(var.type) + ' ' + var.name + ';\n' + str(adjacent_slot.type) + ' ' + adjacent_slot.name + ';',
+                    'example_after': str(var.type) + ' ' + var.name + '; ' + str(adjacent_slot.type) + ' ' + adjacent_slot.name + '; // packed',
+                    'rationale': 'Packing small variables into the same storage slot saves gas on reads/writes.'
+                })
+        return optimizations
+
+    def analyze_multiple_small_uints(self, contract: Contract) -> List[Dict[str, Any]]:
         """
-        Analyze storage packing opportunities.
+        Analyze for multiple small uint variables that can be packed.
         """
         optimizations = []
+        small_uints = []
         
-        # Group state variables by their storage slot
-        storage_slots = {}
         for var in contract.state_variables:
-            if var.visibility in ['public', 'internal', 'private']:
-                slot = var.storage_slot
-                if slot not in storage_slots:
-                    storage_slots[slot] = []
-                storage_slots[slot].append(var)
+            if str(var.type).startswith('uint') and 'uint256' not in str(var.type):
+                size = self._get_variable_size(var.type)
+                if size < 32:
+                    small_uints.append(var)
         
-        # Check for storage packing opportunities
-        for slot, vars_in_slot in storage_slots.items():
-            if len(vars_in_slot) > 1:
-                # Check if variables can be packed
-                can_pack = True
-                total_size = 0
-                for var in vars_in_slot:
-                    # Get variable size in bytes
-                    var_size = self._get_variable_size(var.type)
-                    if var_size > 32:
-                        can_pack = False
-                        break
-                    total_size += var_size
-                
-                if can_pack and total_size <= 32:
-                    optimizations.append({
-                        'issue': 'Storage Packing Opportunity',
-                        'severity': 'medium',
-                        'suggestion': 'These variables can be packed into a single storage slot',
-                        'saving': '~2000-5000 gas per slot saved',
-                        'category': 'storage',
-                        'matched_code': ', '.join([v.name for v in vars_in_slot]),
-                        'example_before': '\n'.join([f'{v.type} {v.name};' for v in vars_in_slot]),
-                        'example_after': '// Consider packing these variables together\n' +
-                                        '\n'.join([f'{v.type} {v.name};' for v in vars_in_slot]),
-                        'rationale': 'Multiple small variables can be packed into a single storage slot to save gas'
-                    })
+        if len(small_uints) > 1:
+            total_size = sum(self._get_variable_size(var.type) for var in small_uints)
+            if total_size <= 32:
+                optimizations.append({
+                    'issue': 'Multiple Small Uints',
+                    'severity': 'medium',
+                    'suggestion': 'Pack multiple small uint variables into a single slot',
+                    'saving': f'~{2000 * (len(small_uints) - 1)} gas per access',
+                    'category': 'storage',
+                    'matched_code': ', '.join([f'{v.type} {v.name}' for v in small_uints]),
+                    'example_before': '\n'.join([f'{var.type} {var.name};' for var in small_uints]),
+                    'example_after': '// Pack these into one uint256 or struct',
+                    'rationale': 'Small uints waste storage slots; packing them saves gas.'
+                })
         
         return optimizations
 
@@ -151,30 +156,19 @@ class GasOptimizationAnalyzer:
     def analyze_public_mappings(self, contract: Contract) -> List[Dict[str, Any]]:
         """Detect public mappings that could be made private."""
         optimizations = []
-        
         for var in contract.state_variables:
-            if var.visibility == 'public' and str(var.type).startswith('mapping'):
-                # Check if there's a getter function that could replace the public mapping
-                has_getter = any(
-                    f.is_constructor is False and 
-                    f.visibility in ['public', 'external'] and 
-                    f.pure or f.view
-                    for f in contract.functions
-                )
-                
-                if not has_getter:
-                    optimizations.append({
-                        'issue': 'Public Mapping',
-                        'severity': 'low',
-                        'suggestion': f'Consider making mapping {var.name} private and adding a getter function',
-                        'saving': '~2000 gas per access',
-                        'category': 'storage',
-                        'matched_code': f'mapping(...) public {var.name}' if hasattr(var, 'name') else str(var),
-                        'example_before': f'mapping(...) public {var.name};',
-                        'example_after': f'mapping(...) private {var.name};\n\n    function get{var.name.capitalize()}(...) public view returns (...) {{\n        return {var.name}[...];\n    }}',
-                        'rationale': 'Public mappings generate an implicit getter function. Using a private mapping with an explicit getter can save gas.'
-                    })
-        
+            if isinstance(var.type, slither.core.solidity_types.MappingType) and var.visibility == 'public':  # Changed from str(var.type).startswith('mapping')
+                optimizations.append({
+                    'issue': 'Public Mapping Getter',
+                    'severity': 'medium',
+                    'suggestion': f'Make mapping {var.name} private and add explicit getter function',
+                    'saving': '~3000 gas per call to implicit getter',
+                    'category': 'storage',
+                    'matched_code': f'mapping(...) public {var.name}',
+                    'example_before': f'mapping(...) public {var.name};',
+                    'example_after': f'mapping(...) private {var.name};\n\n    function get{var.name.capitalize()}(...) public view returns (...) {{ return {var.name}[...]; }}',
+                    'rationale': 'Public mappings generate an implicit getter function. Using a private mapping with an explicit getter can save gas.'
+                })
         return optimizations
 
     def analyze_struct_packing(self, contract: Contract) -> List[Dict[str, Any]]:
@@ -237,9 +231,9 @@ class GasOptimizationAnalyzer:
     def analyze_dynamic_bytes(self, contract: Contract) -> List[Dict[str, Any]]:
         """Detect dynamic bytes arrays that could be fixed-size."""
         optimizations = []
-        
         for var in contract.state_variables:
-            if str(var.type) == 'bytes' and var.visibility in ['public', 'private', 'internal']:
+            from slither.core.solidity_types import DynamicBytes
+            if isinstance(var.type, DynamicBytes):
                 optimizations.append({
                     'issue': 'Dynamic Bytes Array',
                     'severity': 'medium',
@@ -251,15 +245,13 @@ class GasOptimizationAnalyzer:
                     'example_after': f'bytes32 public {var.name};  // If max size is 32 bytes',
                     'rationale': 'Dynamic bytes arrays are more expensive in terms of gas than fixed-size bytes.'
                 })
-        
         return optimizations
 
     def analyze_mapping_initialization(self, contract: Contract) -> List[Dict[str, Any]]:
         """Detect mappings that are initialized with values."""
         optimizations = []
-        
         for var in contract.state_variables:
-            if str(var.type).startswith('mapping') and var.expression:
+            if isinstance(var.type, slither.core.solidity_types.MappingType) and var.expression:  # Changed from str(var.type).startswith('mapping')
                 optimizations.append({
                     'issue': 'Mapping with Initial Value',
                     'severity': 'low',
@@ -268,10 +260,9 @@ class GasOptimizationAnalyzer:
                     'category': 'deployment',
                     'matched_code': f'mapping(...) public {var.name} = ...;',
                     'example_before': f'mapping(...) public {var.name} = {{ ... }};',
-                    'example_after': f'mapping(...) public {var.name};\n\n    constructor() {{\n        {var.name}[...] = ...;\n    }}',
+                    'example_after': f'mapping(...) public {var.name};\n\n    constructor() {{ {var.name}[...] = ...; }}',
                     'rationale': 'Initializing mappings at declaration is more expensive than in the constructor.'
                 })
-        
         return optimizations
 
     def _get_variable_size(self, var_type) -> int:
