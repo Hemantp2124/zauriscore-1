@@ -24,7 +24,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 from ..data.contract_source_retriever import ContractSourceRetriever
 from ..analyzers.heuristic_analyzer import HeuristicAnalyzer
 from ..models.codebert import CodeBERTRegressor
-from ..utils.report_generator import generate_report
+from ..reporting.consolidated_report_generator import create_report_generator
 
 # Configuration
 HIGH_RISK_THRESHOLD = 60

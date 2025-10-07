@@ -33,11 +33,11 @@ class MultiToolAnalyzer:
             """Validate Etherscan API key format and basic integrity"""
             if not key or len(key) < 10:
                 return False
-            
-            # Additional validation checks
-            if not key.isupper() or not all(c.isalnum() for c in key):
+
+            # More lenient validation - Etherscan API keys can contain mixed case and special chars
+            if len(key.strip()) < 10:
                 return False
-            
+
             return True
         
         # API key resolution
@@ -164,16 +164,17 @@ class MultiToolAnalyzer:
         self.logger.debug(f"Using Etherscan API Key: {self.api_key[:5]}...{self.api_key[-5:]} for contract {contract_address}")
         
         # Construct URL with explicit API key
-        url = "https://api.etherscan.io/api"
+        url = "https://api.etherscan.io/v2/api"
         
         # Validate API key before making request
         if not self.api_key or self.api_key == 'INVALID_API_KEY':
             raise ValueError("Cannot make Etherscan API request with invalid API key")
         
         # Explicit API key sanitization
-        sanitized_api_key = ''.join(c for c in self.api_key if c.isalnum())
+        sanitized_api_key = self.api_key.strip()  # Only strip whitespace, don't remove valid characters
         
         params = {
+            "chainid": 1,  # Ethereum mainnet
             "module": "contract",
             "action": "getsourcecode",
             "address": contract_address,
@@ -293,19 +294,8 @@ class MultiToolAnalyzer:
             from web3 import Web3
             from web3.auto import w3
             
-            # Try to get source code via web3
-            source_code = w3.eth.contract(address=Web3.toChecksumAddress(contract_address)).source_code
-            
-            if source_code:
-                source_data = {
-                    'source_code': source_code,
-                    'contract_name': 'Unknown (Web3 Retrieval)',
-                    'retrieval_method': 'web3'
-                }
-                
-                # Save to cache
-                save_to_cache(contract_address, source_data)
-                return source_data
+            # Web3.py cannot retrieve Solidity source code from the blockchain.
+            self.logger.warning("Web3.py cannot retrieve Solidity source code from the blockchain. Skipping Web3 fallback.")
         except Exception as e:
             self.logger.warning(f"Web3.py source code retrieval failed: {e}")
         

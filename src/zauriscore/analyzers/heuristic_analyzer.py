@@ -616,20 +616,31 @@ class HeuristicAnalyzer:
             return {"error": str(e), "success": False}
 
 
-def test_heuristic_analyzer() -> None:
-    """Run basic tests for the heuristic analyzer."""
-    import doctest
-    import pytest
-    
-    # Run doctests
-    doctest.testmod()
-    
-    # Run pytest tests
-    test_dir = os.path.join(os.path.dirname(__file__), "tests")
-    if os.path.exists(test_dir):
-        pytest.main([test_dir])
-    else:
-        logger.warning("Test directory not found: %s", test_dir)
+def calculate_heuristic_score(contract_code: str) -> Dict[str, Any]:
+    """Calculate heuristic score for contract code.
+
+    This is a wrapper function for backward compatibility with the report generator.
+
+    Args:
+        contract_code: Solidity source code to analyze
+
+    Returns:
+        Dict containing heuristic analysis results
+    """
+    analyzer = HeuristicAnalyzer()
+    result = analyzer.analyze(contract_code)
+
+    # Transform the result to match expected format
+    return {
+        'score': result['score'],
+        'raw_score': result['raw_score'],
+        'findings': result['findings'],
+        'slither_detectors': result.get('slither_results', {}).get('results', {}).get('detectors', []),
+        'slither_error': result.get('slither_results', {}).get('error'),
+        'vulnerability_flags': [f['check'] for f in result['findings'] if f['type'] in ['heuristic', 'ml']],
+        'economic_risk': result['economic_risk'],
+        'success': result['success']
+    }
 
 
 if __name__ == "__main__":

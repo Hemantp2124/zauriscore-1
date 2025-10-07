@@ -1,8 +1,9 @@
 import slither
+import os
 import json
 import logging
 import networkx as nx
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 from slither.core.cfg.node import Node
 from slither.slithir.operations import LibraryCall, InternalCall
@@ -24,9 +25,31 @@ class SlitherUtils:
         :return: Slither instance
         """
         try:
-            slither_instance = slither.Slither(contract_path)
-            logger.info(f'Slither initialized successfully for {contract_path}')
-            return slither_instance
+            # Change working directory to the contract's folder so solc resolves relative imports
+            original_cwd = None
+            try:
+                original_cwd = os.getcwd()
+            except Exception:
+                original_cwd = None
+
+            contract_dir = os.path.dirname(os.path.abspath(contract_path)) or '.'
+            try:
+                os.chdir(contract_dir)
+            except Exception:
+                # If chdir fails, continue and let Slither handle paths
+                pass
+
+            try:
+                slither_instance = slither.Slither(contract_path)
+                logger.info(f'Slither initialized successfully for {contract_path}')
+                return slither_instance
+            finally:
+                # Restore original cwd
+                if original_cwd:
+                    try:
+                        os.chdir(original_cwd)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.error(f'Failed to initialize Slither: {e}')
             raise
@@ -185,7 +208,7 @@ class SlitherUtils:
         return features
 
     # Legacy run_detectors method kept for compatibility
-    def run_detectors(self, slither_instance, detector_names: List[str] = None) -> Dict[str, Any]:
+    def run_detectors(self, slither_instance, detector_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Run Slither detectors and return results.
         :param slither_instance: Initialized Slither instance

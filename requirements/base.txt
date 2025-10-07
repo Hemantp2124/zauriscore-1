@@ -1,17 +1,17 @@
 # Core Dependencies
-torch>=2.7.0
+torch>=2.8.0  # Updated from 2.7.0 due to CVE-2025-32434 vulnerability
 transformers>=4.51.0
 pandas>=2.2.3
 numpy>=1.24.0
 scikit-learn>=1.6.1
 requests>=2.32.3
-mythril
+mythril>=0.23.24  # Added version constraint for security
 python-dotenv>=1.1.0
 pydantic>=2.11.4
 
 # Web Framework
-fastapi>=0.63.0
-uvicorn>=0.13.0
+fastapi>=0.95.2  # Updated from 0.63.0 for security fixes
+uvicorn[standard]>=0.22.0  # Updated from 0.13.0 for security fixes
 jinja2>=3.1.6
 
 # Smart Contract Analysis

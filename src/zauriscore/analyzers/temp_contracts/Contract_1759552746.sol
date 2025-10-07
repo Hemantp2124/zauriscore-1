@@ -1,0 +1,1 @@
+pragma solidity ^0.8.0; contract Bad { function send() public { address(0x0).send(msg.value); } }

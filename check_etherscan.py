@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 class EtherscanConfig:
     """Configuration for Etherscan API client."""
     api_key: str
-    base_url: str = "https://api.etherscan.io/api"
+    base_url: str = "https://api.etherscan.io/v2/api"
+    chain_id: int = 1  # Ethereum mainnet
     timeout: int = 15
     max_retries: int = 3
     backoff_factor: float = 0.5
@@ -40,6 +41,12 @@ class EtherscanConfig:
         """Validate configuration on initialization."""
         if not self.api_key:
             raise ValueError("Etherscan API key is required")
+        
+        # Sanitize base URL to prevent SSRF attacks
+        allowed_domains = ["api.etherscan.io", "api-goerli.etherscan.io", "api-sepolia.etherscan.io"]
+        if not any(domain in self.base_url for domain in allowed_domains):
+            raise ValueError(f"Invalid base URL: {self.base_url}. Must be an official Etherscan API domain.")
+            
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
 class EtherscanClient:
@@ -99,6 +106,7 @@ def get_contract_source_code(
     if not validate_ethereum_address(contract_address):
         raise ValueError(f"Invalid Ethereum address: {contract_address}")
 
+    # Sanitize input parameters
     params = {
         "module": "contract",
         "action": "getsourcecode",
@@ -108,6 +116,8 @@ def get_contract_source_code(
 
     try:
         logger.info("Fetching contract data for address: %s", contract_address)
+        
+        # Use a timeout to prevent hanging requests
         response = client.session.get(
             client.config.base_url,
             params=params,
@@ -115,6 +125,11 @@ def get_contract_source_code(
         )
         response.raise_for_status()
         
+        # Rate limiting protection
+        if 'rate limit' in response.text.lower():
+            logger.warning("Rate limit warning detected, sleeping for 1 second")
+            time.sleep(1)
+            
         data = response.json()
         
         if data.get('status') != '1':

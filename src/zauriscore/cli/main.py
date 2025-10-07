@@ -10,7 +10,7 @@ from typing import Optional
 
 from zauriscore.core.ml_pipeline import ZauriScoreMLPipeline
 from zauriscore.analyzers.comprehensive_contract_analysis import ComprehensiveContractAnalyzer
-from zauriscore.utils.report_generator import generate_report
+from zauriscore.reporting.consolidated_report_generator import create_report_generator
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,8 @@ def analyze_contract(contract_path: str, output_path: Optional[str] = None,
         result = analyzer.analyze_contract(contract_path)
         
         if output_path:
-            output = generate_report(result, output_path, format)
+            generator = create_report_generator(output_path)
+            output = generator.generate_report(result, format)
             logger.info(f"Report generated: {output}")
         else:
             # Print to stdout if no output file specified
@@ -49,7 +50,8 @@ def analyze_contract(contract_path: str, output_path: Optional[str] = None,
                 import json
                 print(json.dumps(result, indent=2))
             else:
-                print(generate_report(result, format=format))
+                generator = create_report_generator()
+                print(generator.generate_report(result, format))
                 
     except Exception as e:
         logger.error(f"Error analyzing contract: {e}")

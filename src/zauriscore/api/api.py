@@ -6,7 +6,7 @@ from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
 # Custom modules
-from ..utils.report_generator import generate_contract_report
+from ..reporting.consolidated_report_generator import create_report_generator
 
 # Load environment variables
 load_dotenv()
@@ -59,7 +59,8 @@ def analyze_contract():
     app.logger.info(f"Analyzing contract: {contract_address}")
 
     try:
-        result = generate_contract_report(contract_address, api_key, app.config['REPORTS_DIR'])
+        generator = create_report_generator()
+        result = generator.generate_contract_report(contract_address, api_key, app.config['REPORTS_DIR'])
 
         if isinstance(result, tuple) and len(result) == 2:
             report_path_json, report_path_md = result
