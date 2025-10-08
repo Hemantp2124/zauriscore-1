@@ -1,5 +1,14 @@
+import sys
 import argparse
 import logging
+from pathlib import Path
+
+# Add src directory to Python path for development
+current_dir = Path(__file__).parent
+src_path = current_dir / 'src'
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
+
 from smart_contract_security.analyzers.comprehensive_contract_analysis import ComprehensiveContractAnalyzer
 import os
 

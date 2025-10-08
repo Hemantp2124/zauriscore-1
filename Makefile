@@ -7,9 +7,9 @@ test:
 	pytest tests/
 
 lint:
-	flake8 src/smart-contract-security
-	black src/smart-contract-security
-	isort src/smart-contract-security
+	flake8 src/smart_contract_security
+	black src/smart_contract_security
+	isort src/smart_contract_security
 
 clean:
 	@echo "Cleaning build artifacts..."
