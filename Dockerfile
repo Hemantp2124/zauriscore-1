@@ -36,4 +36,4 @@ COPY . .
 EXPOSE 8000
 
 # Command to run the application
-CMD ["uvicorn", "src.zauriscore.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "smart_contract_security.api.fastapi_app:app", "--host", "0.0.0.0", "--port", "8000"]

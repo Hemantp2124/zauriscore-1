@@ -2,8 +2,6 @@
 # Maximum line length
 exclude = .git,__pycache__,venv,build,dist
 max-line-length = 120
-max-complexity = 15
-ignore = E226,E302,E41,E402,E501,E731
 max-complexity = 10
 select = B,C,E,F,W,T4,B9
 per-file-ignores =

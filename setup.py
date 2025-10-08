@@ -25,7 +25,7 @@ prod_reqs = [r for r in read_requirements('prod.txt') if r not in base_reqs]
 
 setup(
     name="zauriscore",
-    version="0.1.0",
+    version="1.0.0",
     description="AI-powered smart contract security analysis platform",
     # Read README with a context manager
     long_description=(
@@ -46,7 +46,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "zauriscore=zauriscore.cli.main:main",
+            "smart-contract-security=smart_contract_security.cli.main:main",
         ],
     },
     classifiers=[

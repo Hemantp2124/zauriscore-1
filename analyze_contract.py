@@ -1,7 +1,6 @@
-import sys
 import argparse
 import logging
-from zauriscore.analyzers.comprehensive_contract_analysis import ComprehensiveContractAnalyzer
+from smart_contract_security.analyzers.comprehensive_contract_analysis import ComprehensiveContractAnalyzer
 import os
 
 # Configure logging

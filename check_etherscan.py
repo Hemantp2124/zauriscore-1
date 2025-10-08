@@ -3,8 +3,6 @@
 import json
 import logging
 import os
-import re
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path

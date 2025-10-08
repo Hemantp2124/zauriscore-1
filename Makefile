@@ -7,14 +7,15 @@ test:
 	pytest tests/
 
 lint:
-	flake8 src/zauriscore
-	black src/zauriscore
-	isort src/zauriscore
+	flake8 src/smart-contract-security
+	black src/smart-contract-security
+	isort src/smart-contract-security
 
 clean:
-	rm -rf build/
-	rm -rf dist/
-	rm -rf *.egg-info
+	@echo "Cleaning build artifacts..."
+	@if [ -d "build" ]; then rm -rf build/; fi
+	@if [ -d "dist" ]; then rm -rf dist/; fi
+	@if [ -f "*.egg-info" ]; then rm -rf *.egg-info; fi
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 

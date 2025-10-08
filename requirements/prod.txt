@@ -3,7 +3,7 @@
 
 # Production Server
 gunicorn>=21.0.0
-uvicorn[standard]>=0.13.0
+uvicorn[standard]>=0.22.0
 
 # Monitoring
 prometheus-client>=0.17.0
