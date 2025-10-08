@@ -149,14 +149,20 @@ def analyze_contract(request: ContractAnalysisRequest):
     Analyze smart contract: Fetch from Etherscan, run Slither/Mythril/ML, compute weighted risk, return JSON.
     """
     try:
-        contract_address = request.contract_address
         
         # Initialize client with API key from request or environment
         api_key_to_use = request.api_key or os.getenv('ETHERSCAN_API_KEY')
         if not api_key_to_use:
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail="Etherscan API key required. Provide in request or set ETHERSCAN_API_KEY environment variable."
+            )
+
+        # Validate API key format (basic validation)
+        if len(api_key_to_use.strip()) < 20:  # Etherscan API keys are typically 34 characters
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Etherscan API key format. Please provide a valid API key."
             )
             
         # Create client for this request
@@ -181,12 +187,31 @@ def analyze_contract(request: ContractAnalysisRequest):
             
         try:
             if source_code.startswith('{{'):
-                # Multi-file JSON
-                source_json = json.loads(source_code[1:-1])  # Remove outer braces if needed
-                # For simplicity, concatenate files or use first; in production, handle properly
-                concatenated_source = '\n'.join([
-                    content.get('content', '') for content in source_json.get('sources', {}).values()
-                ])
+                # Multi-file JSON - validate and parse safely
+                try:
+                    # Remove outer braces and validate JSON structure
+                    json_content = source_code[1:-1]
+                    if not json_content.strip():
+                        raise json.JSONDecodeError("Empty JSON content", json_content, 0)
+
+                    source_json = json.loads(json_content)
+
+                    # Validate expected structure for multi-file contracts
+                    if not isinstance(source_json, dict) or 'sources' not in source_json:
+                        raise ValueError("Invalid multi-file contract JSON structure")
+
+                    # Validate sources structure
+                    sources = source_json.get('sources', {})
+                    if not isinstance(sources, dict):
+                        raise ValueError("Invalid sources structure in contract JSON")
+
+                    # For simplicity, concatenate files or use first; in production, handle properly
+                    concatenated_source = '\n'.join([
+                        content.get('content', '') for content in sources.values()
+                    ])
+                except (json.JSONDecodeError, ValueError, KeyError) as e:
+                    logging.warning(f"Failed to parse multi-file contract JSON for {contract_address}: {str(e)}")
+                    concatenated_source = source_code  # Fallback to raw source
             else:
                 concatenated_source = source_code
         except json.JSONDecodeError:

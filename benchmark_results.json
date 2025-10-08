@@ -1,7 +1,0 @@
-{
-  "ml_mse": 7.821224999999998,
-  "ensemble_mse": 0.6502249999999999,
-  "classification_f1": 0.2,
-  "classification_accuracy": 0.25,
-  "samples": 4
-}
