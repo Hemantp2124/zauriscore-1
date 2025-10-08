@@ -1,3 +1,38 @@
+# Lazy imports for performance
+_torch = None
+_transformers = None
+_requests = None
+_numpy = None
+
+def _get_torch():
+    global _torch
+    if _torch is None:
+        import torch
+        _torch = torch
+    return _torch
+
+def _get_transformers():
+    global _transformers
+    if _transformers is None:
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+        _transformers = (AutoTokenizer, AutoModelForSequenceClassification)
+    return _transformers
+
+def _get_requests():
+    global _requests
+    if _requests is None:
+        import requests
+        _requests = requests
+    return _requests
+
+def _get_numpy():
+    global _numpy
+    if _numpy is None:
+        import numpy as np
+        _numpy = np
+    return _numpy
+
+# Core lightweight imports (keep these)
 import sys
 import json
 import logging
@@ -6,20 +41,9 @@ import tempfile
 from typing import Dict, Any, Optional, List, Tuple, Union, cast
 from pathlib import Path
 from .slither_utils import SlitherUtils
-from slither.analyses.data_dependency.data_dependency import is_dependent
-from slither.core.declarations import Function, Contract, FunctionContract
-from slither.slithir.operations import HighLevelCall, LowLevelCall, InternalCall
-from slither.slithir.variables import Constant
-from slither.core.variables.state_variable import StateVariable
-from slither.core.cfg.node import Node, NodeType
-from slither.core.expressions.expression import Expression
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import numpy as np
 from dotenv import load_dotenv
 import re
 from datetime import datetime
-import requests
 
 # Import our analyzers
 from .code_similarity import CodeSimilarityAnalyzer
@@ -31,11 +55,12 @@ load_dotenv()
 
 # Configure logging
 log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+log_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'zauriscore.log')
 logging.basicConfig(
     level=logging.INFO,
     format=log_format,
     handlers=[
-        logging.FileHandler('zauriscore.log'),
+        logging.FileHandler(log_file_path),
         logging.StreamHandler()
     ]
 )
@@ -92,9 +117,14 @@ class ComprehensiveContractAnalyzer:
         self.slither = None  # Will be initialized when needed
 
     def _load_codebert(self):
+        """Load CodeBERT model with proper device handling."""
         try:
             if self._codebert_tokenizer is None or self._codebert_model is None:
-                # Suppress warnings about uninitialized weights since we're using pre-trained model for classification
+                # Use lazy imports
+                torch = _get_torch()
+                AutoTokenizer, AutoModelForSequenceClassification = _get_transformers()
+
+                # Suppress warnings about uninitialized weights
                 import warnings
                 import logging as python_logging
 
@@ -103,13 +133,39 @@ class ComprehensiveContractAnalyzer:
 
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", message=".*Some weights of.*were not initialized.*")
+
+                    # Load tokenizer and model
                     self._codebert_tokenizer = AutoTokenizer.from_pretrained('microsoft/codebert-base')
-                    self._codebert_model = AutoModelForSequenceClassification.from_pretrained('microsoft/codebert-base')
-                self.logger.info("CodeBERT model and tokenizer loaded successfully")
+
+                    # Use AutoModel and add classification head for proper binary classification
+                    from transformers import AutoModel
+                    base_model = AutoModel.from_pretrained('microsoft/codebert-base')
+
+                    # Add classification head
+                    class CodeBERTClassifier(torch.nn.Module):
+                        def __init__(self, base_model):
+                            super().__init__()
+                            self.base_model = base_model
+                            self.classifier = torch.nn.Linear(base_model.config.hidden_size, 2)  # Binary classification
+
+                        def forward(self, input_ids, attention_mask=None):
+                            outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
+                            pooled_output = outputs.pooler_output
+                            return self.classifier(pooled_output)
+
+                    self._codebert_model = CodeBERTClassifier(base_model)
+
+                    # Move to appropriate device
+                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                    self._codebert_model.to(device)
+                    self._device = device
+
+                self.logger.info(f"CodeBERT model and tokenizer loaded successfully on device: {self._device}")
         except Exception as e:
             self.logger.error(f"Failed to load CodeBERT model/tokenizer: {e}")
             self._codebert_tokenizer = None
             self._codebert_model = None
+            self._device = None
 
     def _run_codebert_analysis(self, source_code: str) -> Dict[str, Any]:
         """Run CodeBERT analysis on the source code."""
@@ -117,29 +173,27 @@ class ComprehensiveContractAnalyzer:
             self._load_codebert()
 
         try:
+            # Use lazy imports
+            torch = _get_torch()
+
             # Preprocess the code
             source_code = source_code.strip()
             if not source_code:
                 return {'error': 'Empty source code'}
 
-            # Truncate overly long inputs to avoid tokenizer/model indexing errors.
-            # CodeBERT max tokens ~512; use a conservative character limit before tokenization.
-            # Conservative character limit to keep token count under model max (512 tokens)
-            # Rough heuristic: 4000 chars should be safe for CodeBERT's 512-token limit for most code.
-            MAX_CHARS = 4000
-            if len(source_code) > MAX_CHARS:
-                self.logger.warning(f"Source code length {len(source_code)} exceeds {MAX_CHARS} chars; truncating for ML model.")
-                source_code = source_code[:MAX_CHARS]
-
-            # Tokenize and encode (guard tokenizer presence)
+            # Truncate based on tokenizer max length instead of character count
             if not self._codebert_tokenizer:
                 raise RuntimeError("CodeBERT tokenizer not available")
 
-            # Cast tokenizer and model to Any (type-checker friendly)
-            tokenizer = cast(Any, self._codebert_tokenizer)
-            model = cast(Any, self._codebert_model)
+            # Tokenize to check length
+            tokens = self._codebert_tokenizer.tokenize(source_code)
+            if len(tokens) > 512:
+                self.logger.warning(f"Input sequence truncated from {len(tokens)} to 512 tokens")
+                # Truncate tokens instead of characters for better accuracy
+                source_code = self._codebert_tokenizer.convert_tokens_to_string(tokens[:512])
 
-            inputs = tokenizer(
+            # Tokenize and encode
+            inputs = self._codebert_tokenizer(
                 source_code,
                 padding=True,
                 truncation=True,
@@ -147,17 +201,18 @@ class ComprehensiveContractAnalyzer:
                 return_tensors="pt"
             )
 
-            # Check for truncation and log if occurred
-            if len(tokenizer.tokenize(source_code)) > 512:
-                self.logger.warning(f"Input sequence was truncated from {len(tokenizer.tokenize(source_code))} to 512 tokens")
+            # Move to device if available
+            if self._device:
+                inputs = {k: v.to(self._device) for k, v in inputs.items()}
 
             # Get model predictions
-            if not model:
+            if not self._codebert_model:
                 raise RuntimeError("CodeBERT model not available")
+
             with torch.no_grad():
-                outputs = model(**inputs)
-                logits = outputs.logits
-                
+                outputs = self._codebert_model(**inputs)
+                logits = outputs
+
             # Get predicted class and confidence scores
             predicted_class = torch.argmax(logits, dim=1).item()
             confidence_scores = torch.softmax(logits, dim=1).tolist()[0]
@@ -321,24 +376,29 @@ class ComprehensiveContractAnalyzer:
         results['summary']['plain_language_report'] = '\n'.join(str(item) for item in plain_report if item)
 
         # Generate recommendations (enhanced legacy for backward compatibility)
-        recommendations = []
-        
+        # Merge with existing recommendations instead of overwriting
+        existing_recommendations = results['summary'].get('recommendations', [])
+        if isinstance(existing_recommendations, list):
+            recommendations = existing_recommendations.copy()
+        else:
+            recommendations = []
+
         # Add security recommendations
         if high_issues > 0:
             recommendations.append("Critical security issues detected. Immediate review required.")
         if medium_issues > 0:
             recommendations.append("Medium severity issues found. Review and fix recommended.")
-        
+
         # Add gas optimization recommendations
         if results['gas_optimization']['estimated_savings'] > 0:
             recommendations.append(f"Gas optimization opportunities found. Estimated savings: ~{results['gas_optimization']['estimated_savings']} gas")
-        
+
         # Add ML analysis recommendations
         if results['ml_analysis'].get('predicted_class') == 1:
             confidence = results['ml_analysis'].get('confidence_scores', [0, 0])[1]
             if confidence > 0.7:
                 recommendations.append("ML model detected potential vulnerabilities. Review ML analysis results.")
-        
+
         # Add risk-based recommendations
         if 'trust_risk_scoring' in results:
             risk_score = results['trust_risk_scoring']['risk_score']
@@ -348,6 +408,7 @@ class ComprehensiveContractAnalyzer:
                 recommendations.append("WARNING: Moderate risk. Review thoroughly.")
             else:
                 recommendations.append("SAFE: Low risk score. Suitable for deployment.")
+
         results['summary']['recommendations'] = recommendations
 
     def _extract_features(self, contract):
@@ -398,20 +459,30 @@ class ComprehensiveContractAnalyzer:
         try:
             if source_code is None and contract_address:
                 # Get source code from chain explorer
-                contract_data = self.get_contract_source(contract_address, chain)
-                if contract_data.get('status') == '1':
-                    item = contract_data['result'][0]
-                    source_code = item.get('SourceCode', '')
-                    # Add contract metadata to results
-                    results.update({
-                        'contract_name': item.get('ContractName', 'Unknown'),
-                        'compiler_version': item.get('CompilerVersion', 'Unknown'),
-                        'optimization_used': item.get('OptimizationUsed', 'Unknown'),
-                        'runs': item.get('Runs', 0)
-                    })
+                try:
+                    contract_data = self.get_contract_source(contract_address, chain)
+                    if contract_data.get('status') == '1':
+                        item = contract_data['result'][0]
+                        source_code = item.get('SourceCode', '')
+                        # Add contract metadata to results
+                        results.update({
+                            'contract_name': item.get('ContractName', 'Unknown'),
+                            'compiler_version': item.get('CompilerVersion', 'Unknown'),
+                            'optimization_used': item.get('OptimizationUsed', 'Unknown'),
+                            'runs': item.get('Runs', 0)
+                        })
+                except Exception as e:
+                    self.logger.error(f"Failed to fetch contract source code: {e}")
+                    return {'error': f'Failed to fetch contract source code: {str(e)}'}
+
                 # Fetch historical data if address provided
-                tx_count = self.get_transaction_count(contract_address, chain)
-                results['historical_data'] = {'transaction_count': tx_count, 'chain': chain}
+                try:
+                    tx_count = self.get_transaction_count(contract_address, chain)
+                    results['historical_data'] = {'transaction_count': tx_count, 'chain': chain}
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch transaction count: {e}")
+                    results['historical_data'] = {'transaction_count': 0, 'chain': chain}
+
             elif source_code:
                 # For direct source code analysis
                 results.update({
@@ -421,8 +492,12 @@ class ComprehensiveContractAnalyzer:
                     'runs': 0
                 })
                 if contract_address:
-                    tx_count = self.get_transaction_count(contract_address, chain)
-                    results['historical_data'] = {'transaction_count': tx_count, 'chain': chain}
+                    try:
+                        tx_count = self.get_transaction_count(contract_address, chain)
+                        results['historical_data'] = {'transaction_count': tx_count, 'chain': chain}
+                    except Exception as e:
+                        self.logger.warning(f"Failed to fetch transaction count: {e}")
+                        results['historical_data'] = {'transaction_count': 0, 'chain': chain}
                 else:
                     results['historical_data'] = {'transaction_count': 0, 'chain': chain}
 
@@ -430,95 +505,118 @@ class ComprehensiveContractAnalyzer:
             results['source_code'] = source_code
 
             # Directory to place temporary contract files
-            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'temp_contracts')
-            os.makedirs(temp_dir, exist_ok=True)
-
-            # Default main file path
-            import time
-            main_file = os.path.abspath(os.path.join(temp_dir, f'Contract_{int(time.time())}.sol'))
-
-            # Normalize Etherscan quirks: double-braced JSON and escaped newlines
-            sc = (source_code or '').strip()
-            # If JSON wrapped in extra braces {{ ... }}, strip one layer
-            if (sc.startswith("{{") and sc.endswith("}}")) or (sc.startswith("{\n{") and sc.rstrip().endswith("}\n}")):
-                sc = sc[1:-1]
-
-            # Attempt to parse as JSON (multi-file format)
-            parsed = None
             try:
-                parsed = json.loads(sc)
-            except json.JSONDecodeError:
-                # Try to recover: extract inner JSON object if Etherscan wrapped it
+                # Use system temp directory for better portability
+                import tempfile
+                base_temp_dir = os.path.join(tempfile.gettempdir(), 'zauriscore_contracts')
+                os.makedirs(base_temp_dir, exist_ok=True)
+                temp_dir = base_temp_dir
+
+                # Default main file path
+                import time
+                main_file = os.path.join(temp_dir, f'Contract_{int(time.time())}.sol')
+
+                # Normalize Etherscan quirks: double-braced JSON and escaped newlines
+                sc = (source_code or '').strip()
+                # If JSON wrapped in extra braces {{ ... }}, strip one layer
+                if (sc.startswith("{{") and sc.endswith("}}")) or (sc.startswith("{\n{") and sc.rstrip().endswith("}\n}")):
+                    sc = sc[1:-1]
+
+                # Attempt to parse as JSON (multi-file format)
+                parsed = None
                 try:
-                    # Look for a common key indicating the JSON contract wrapper
-                    key_idx = sc.find('"language"')
-                    if key_idx != -1:
-                        # find the opening brace before the key and the last closing brace
-                        start_idx = sc.rfind('{', 0, key_idx)
-                        end_idx = sc.rfind('}')
-                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                            candidate = sc[start_idx:end_idx+1]
-                            parsed = json.loads(candidate)
-                    # Fallback: try decoding escaped sequences and parse again
-                    if parsed is None:
+                    parsed = json.loads(sc)
+                except json.JSONDecodeError:
+                    # Try to recover: extract inner JSON object if Etherscan wrapped it
+                    try:
+                        # Look for a common key indicating the JSON contract wrapper
+                        key_idx = sc.find('"language"')
+                        if key_idx != -1:
+                            # find the opening brace before the key and the last closing brace
+                            start_idx = sc.rfind('{', 0, key_idx)
+                            end_idx = sc.rfind('}')
+                            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                                candidate = sc[start_idx:end_idx+1]
+                                parsed = json.loads(candidate)
+                        # Fallback: try decoding escaped sequences and parse again
+                        if parsed is None:
+                            try:
+                                alt = bytes(sc, 'utf-8').decode('unicode_escape')
+                                parsed = json.loads(alt)
+                            except Exception:
+                                parsed = None
+                    except Exception:
+                        parsed = None
+
+                if isinstance(parsed, dict) and 'sources' in parsed:
+                    # Write each source file for completeness
+                    concatenated = []
+                    for rel_path, file_data in parsed['sources'].items():
                         try:
-                            alt = bytes(sc, 'utf-8').decode('unicode_escape')
-                            parsed = json.loads(alt)
-                        except Exception:
-                            parsed = None
-                except Exception:
-                    parsed = None
-
-            if isinstance(parsed, dict) and 'sources' in parsed:
-                # Write each source file for completeness
-                concatenated = []
-                for rel_path, file_data in parsed['sources'].items():
-                    norm_path = os.path.normpath(rel_path)
-                    full_path = os.path.join(temp_dir, norm_path)
-                    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                    content = file_data.get('content', '')
-                    with open(full_path, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    # Collect content to create a flattened main file for Slither
-                    # Remove SPDX license lines to avoid multiple SPDX identifiers in a single concatenated file
-                    cleaned_lines = []
-                    for line in content.splitlines():
-                        if line.strip().startswith('// SPDX-License-Identifier:') or line.strip().startswith('/* SPDX-License-Identifier:'):
-                            # Skip SPDX lines in concatenation; keep file-level license handling flexible
+                            norm_path = os.path.normpath(rel_path)
+                            full_path = os.path.join(temp_dir, norm_path)
+                            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                            content = file_data.get('content', '')
+                            with open(full_path, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                            # Collect content to create a flattened main file for Slither
+                            # Remove SPDX license lines to avoid multiple SPDX identifiers in a single concatenated file
+                            cleaned_lines = []
+                            for line in content.splitlines():
+                                if line.strip().startswith('// SPDX-License-Identifier:') or line.strip().startswith('/* SPDX-License-Identifier:'):
+                                    # Skip SPDX lines in concatenation; keep file-level license handling flexible
+                                    continue
+                                cleaned_lines.append(line)
+                            concatenated.append(f"// File: {rel_path}\n" + '\n'.join(cleaned_lines))
+                        except Exception as e:
+                            self.logger.warning(f"Error processing source file {rel_path}: {e}")
                             continue
-                        cleaned_lines.append(line)
-                    concatenated.append(f"// File: {rel_path}\n" + '\n'.join(cleaned_lines))
 
-                # Create a flattened main file that concatenates all sources. Slither expects a file
-                try:
-                    with open(main_file, 'w', encoding='utf-8') as mf:
-                        mf.write('\n\n'.join(concatenated))
-                    source_path = main_file
-                except Exception:
-                    # Fallback to directory if flattening failed
-                    source_path = temp_dir
-            elif isinstance(parsed, dict) and parsed.get('content'):
-                # Single-file JSON with 'content'
-                with open(main_file, 'w', encoding='utf-8') as f:
-                    f.write(parsed.get('content', source_code))
-                source_path = main_file
-            else:
-                # Not JSON; treat as raw solidity source but unescape if needed
-                try:
-                    # If the string includes escaped newlines like \r\n or \n, unescape them
-                    if "\\n" in sc or "\\r\\n" in sc:
-                        sc = bytes(sc, 'utf-8').decode('unicode_escape')
-                except Exception:
-                    pass
-                with open(main_file, 'w', encoding='utf-8') as f:
-                    f.write(sc)
-                source_path = main_file
+                    # Create a flattened main file that concatenates all sources. Slither expects a file
+                    try:
+                        with open(main_file, 'w', encoding='utf-8') as mf:
+                            mf.write('\n\n'.join(concatenated))
+                        source_path = main_file
+                    except Exception as e:
+                        self.logger.error(f"Error creating concatenated file: {e}")
+                        # Fallback to directory if flattening failed
+                        source_path = temp_dir
+                elif isinstance(parsed, dict) and parsed.get('content'):
+                    # Single-file JSON with 'content'
+                    try:
+                        with open(main_file, 'w', encoding='utf-8') as f:
+                            f.write(parsed.get('content', source_code))
+                        source_path = main_file
+                    except Exception as e:
+                        self.logger.error(f"Error writing single-file contract: {e}")
+                        return {'error': f'Error writing contract file: {str(e)}'}
+                else:
+                    # Not JSON; treat as raw solidity source but unescape if needed
+                    try:
+                        # If the string includes escaped newlines like \r\n or \n, unescape them
+                        if "\\n" in sc or "\\r\\n" in sc:
+                            sc = bytes(sc, 'utf-8').decode('unicode_escape')
+                    except Exception as e:
+                        self.logger.warning(f"Error unescaping source code: {e}")
+
+                    try:
+                        with open(main_file, 'w', encoding='utf-8') as f:
+                            f.write(sc)
+                        source_path = main_file
+                    except Exception as e:
+                        self.logger.error(f"Error writing raw contract file: {e}")
+                        return {'error': f'Error writing contract file: {str(e)}'}
+
+            except Exception as e:
+                self.logger.error(f"Error setting up temporary files: {e}")
+                return {'error': f'Error setting up temporary files: {str(e)}'}
 
         except Exception as e:
             self.logger.error(f"Error preparing source code: {e}")
             return {'error': f'Error preparing source code: {str(e)}'}
             
         # Initialize Slither with the source code
+        slither = None
         try:
             slither = self.slither_utils.init_slither(source_path)
 
@@ -542,22 +640,23 @@ class ComprehensiveContractAnalyzer:
                     results['compiler_version'] = 'Unknown'
                     results['optimization_used'] = 'Unknown'
                     results['runs'] = 0
-                
+
                 # Detect proxy patterns and upgradeability
-                results['upgradeable_analysis'] = {
-                    'is_proxy': False,
-                    'proxy_type': 'None',
-                    'upgrade_safety_score': 10.0,  # Default safe
-                    'storage_collision_risk': False,
-                    'issues': []
-                }
-                
-                if getattr(contract, 'is_proxy', False):
+                try:
+                    results['upgradeable_analysis'] = {
+                        'is_proxy': False,
+                        'proxy_type': 'None',
+                        'upgrade_safety_score': 10.0,  # Default safe
+                        'storage_collision_risk': False,
+                        'issues': []
+                    }
+
+                    if getattr(contract, 'is_proxy', False):
                         results['upgradeable_analysis']['is_proxy'] = True
                         results['upgradeable_analysis']['proxy_type'] = 'UUPS or Transparent'  # Initial general detection
                         results['upgradeable_analysis']['upgrade_safety_score'] -= 3.0  # Base penalty for proxies
-                        
-                        # Check for Transparent Proxy specific issues (register_detector may accept classes in some APIs)
+
+                        # Check for Transparent Proxy specific issues
                         transparent_detector = None
                         if hasattr(slither, 'register_detector'):
                             try:
@@ -579,7 +678,7 @@ class ComprehensiveContractAnalyzer:
                                     'lines': issue.lines
                                 } for issue in transparent_issues])
                                 results['upgradeable_analysis']['upgrade_safety_score'] -= 3.0 * len(transparent_issues)
-                        
+
                         # Check for UUPS Proxy specific issues
                         uups_detector = None
                         if hasattr(slither, 'register_detector'):
@@ -602,30 +701,7 @@ class ComprehensiveContractAnalyzer:
                                     'lines': issue.lines
                                 } for issue in uups_issues])
                                 results['upgradeable_analysis']['upgrade_safety_score'] -= 3.0 * len(uups_issues)
-                        
-                        # Fallback to unprotected upgradeable contract
-                        unprotected_upgrade = None
-                        if hasattr(slither, 'register_detector'):
-                            try:
-                                slither_any = cast(Any, slither)
-                                unprotected_upgrade = slither_any.register_detector('UnprotectedUpgradeableContract')
-                            except Exception:
-                                unprotected_upgrade = None
-                        if unprotected_upgrade:
-                            try:
-                                issues = unprotected_upgrade.detect()
-                            except Exception:
-                                issues = []
-                            if issues:
-                                results['upgradeable_analysis']['issues'].extend([{
-                                    'title': issue.title,
-                                    'description': issue.description,
-                                    'severity': 'High',
-                                    'lines': issue.lines
-                                } for issue in issues])
-                                results['upgradeable_analysis']['upgrade_safety_score'] -= 4.0 * len(issues)
-                                results['upgradeable_analysis']['storage_collision_risk'] = True
-                        
+
                         # Additional check for storage layout issues (simplified)
                         if len(contract.state_variables) > 10:  # Heuristic for complexity
                             results['upgradeable_analysis']['storage_collision_risk'] = True
@@ -636,55 +712,78 @@ class ComprehensiveContractAnalyzer:
                                 'lines': []
                             })
                             results['upgradeable_analysis']['upgrade_safety_score'] -= 2.0
-                
-                # Clamp score
-                results['upgradeable_analysis']['upgrade_safety_score'] = max(0.0, min(10.0, results['upgradeable_analysis']['upgrade_safety_score']))
-                
-                # Extract features for preprocessing
-                preprocessing_features = self._extract_features(contract)
-                results['preprocessing'] = preprocessing_features
-                
-                # Expand tokenization with feature metadata in ML analysis
-                if 'ml_analysis' in results and not results['ml_analysis'].get('error'):
-                    results['ml_analysis']['features_extracted'] = {
-                        'num_functions': len(preprocessing_features['functions']),
-                        'num_state_vars': len(preprocessing_features['state_variables']),
-                        'num_modifiers': len(preprocessing_features['modifiers']),
-                        'num_loops': preprocessing_features['loops']
+
+                    # Clamp score
+                    results['upgradeable_analysis']['upgrade_safety_score'] = max(0.0, min(10.0, results['upgradeable_analysis']['upgrade_safety_score']))
+
+                    # Extract features for preprocessing
+                    preprocessing_features = self._extract_features(contract)
+                    results['preprocessing'] = preprocessing_features
+
+                    # Expand tokenization with feature metadata in ML analysis
+                    if 'ml_analysis' in results and not results['ml_analysis'].get('error'):
+                        results['ml_analysis']['features_extracted'] = {
+                            'num_functions': len(preprocessing_features['functions']),
+                            'num_state_vars': len(preprocessing_features['state_variables']),
+                            'num_modifiers': len(preprocessing_features['modifiers']),
+                            'num_loops': preprocessing_features['loops']
+                        }
+
+                except Exception as e:
+                    self.logger.error(f"Error in contract analysis: {e}")
+                    results['upgradeable_analysis'] = {
+                        'is_proxy': False,
+                        'proxy_type': 'None',
+                        'upgrade_safety_score': 10.0,
+                        'storage_collision_risk': False,
+                        'issues': []
                     }
-                
+
                 # Analyze gas optimization
                 try:
                     gas_results = self.gas_optimizer.analyze(contract)
                     results['gas_optimization']['opportunities'] = gas_results
-                    # Estimate gas savings
-                    results['gas_optimization']['estimated_savings'] = sum(
-                        2000 for _ in gas_results  # Estimate 2000 gas per optimization
-                    )
+                    # Calculate actual gas savings from optimization opportunities
+                    total_savings = 0
+                    for opp in gas_results:
+                        saving_str = opp.get('saving', '0')
+                        # Extract numeric value from saving string (e.g., "~20000 gas per slot saved" -> 20000)
+                        import re
+                        gas_match = re.search(r'~?(\d+)', saving_str)
+                        if gas_match:
+                            total_savings += int(gas_match.group(1))
+
+                    results['gas_optimization']['estimated_savings'] = total_savings
                 except Exception as e:
                     self.logger.error(f"Error in gas optimization analysis: {e}")
                     results['gas_optimization']['opportunities'] = []
                     results['gas_optimization']['estimated_savings'] = 0
 
                 # Run Slither detectors
-                static_issues = self.slither_utils.run_slither_detectors(self.slither)
-                for issue_dict in static_issues:
-                    try:
-                        impact_str = issue_dict.get('impact', 'LOW')
-                        severity_lower = impact_str.lower()
-                        if severity_lower in results['static_analysis']['summary']:
-                            results['static_analysis']['summary'][severity_lower] += 1
-                        results['static_analysis']['detectors'].append({
-                            'title': issue_dict.get('title', 'Unknown'),
-                            'description': issue_dict.get('description', ''),
-                            'severity': impact_str.title(),
-                            'impact': impact_str,
-                            'confidence': issue_dict.get('confidence', 'MEDIUM'),
-                            'lines': issue_dict.get('lines', [])
-                        })
-                    except Exception as e:
-                        self.logger.error(f"Error processing detector issue: {e}")
-                        continue
+                try:
+                    static_issues = self.slither_utils.run_slither_detectors(self.slither)
+                    for issue_dict in static_issues:
+                        try:
+                            impact_str = issue_dict.get('impact', 'LOW')
+                            severity_lower = impact_str.lower()
+                            if severity_lower in results['static_analysis']['summary']:
+                                results['static_analysis']['summary'][severity_lower] += 1
+                            results['static_analysis']['detectors'].append({
+                                'title': issue_dict.get('title', 'Unknown'),
+                                'description': issue_dict.get('description', ''),
+                                'severity': impact_str.title(),
+                                'impact': impact_str,
+                                'confidence': issue_dict.get('confidence', 'MEDIUM'),
+                                'lines': issue_dict.get('lines', [])
+                            })
+                        except Exception as e:
+                            self.logger.error(f"Error processing detector issue: {e}")
+                            continue
+                except Exception as e:
+                    self.logger.error(f"Error running Slither detectors: {e}")
+                    results['static_analysis']['detectors'] = []
+                    results['static_analysis']['summary'] = {'high': 0, 'medium': 0, 'low': 0, 'informational': 0}
+
         except Exception as e:
             # Don't abort the entire analysis if Slither/solc is not available.
             # Log the error and continue with other analyses (ML, Mythril).
@@ -693,6 +792,15 @@ class ComprehensiveContractAnalyzer:
             # Ensure static analysis fields remain present but empty
             results['static_analysis']['detectors'] = []
             results['static_analysis']['summary'] = {'high': 0, 'medium': 0, 'low': 0, 'informational': 0}
+            results['gas_optimization']['opportunities'] = []
+            results['gas_optimization']['estimated_savings'] = 0
+            results['upgradeable_analysis'] = {
+                'is_proxy': False,
+                'proxy_type': 'None',
+                'upgrade_safety_score': 10.0,
+                'storage_collision_risk': False,
+                'issues': []
+            }
             # Continue execution (do not return)
 
                 # Run CodeBERT analysis
@@ -761,7 +869,7 @@ class ComprehensiveContractAnalyzer:
         return results
 
     def get_contract_source(self, address: str, chain: str) -> dict:
-        """Fetch contract source code using Etherscan V2 API."""
+        """Fetch contract source code using Etherscan V2 API with rate limiting."""
         if chain not in self.api_bases:
             raise ValueError(f"Unsupported chain: {chain}. Supported: {list(self.api_bases.keys())}")
 
@@ -774,39 +882,51 @@ class ComprehensiveContractAnalyzer:
         if not address.startswith('0x') or len(address) != 42:
             raise ValueError("Invalid EVM address format")
 
-        try:
-            # Etherscan V2 API with chainid - correct format for 2025
-            masked_key = f"{api_key[:4]}***{api_key[-4:]}" if len(api_key) > 8 else "****"
-            chain_id = self.chain_ids[chain]
-            log_url = f"{base_url}/v2/api?chainid={chain_id}&module=contract&action=getsourcecode&address={address}&apikey={masked_key}"
-            self.logger.info(f"Request URL for {chain}: {log_url}")
+        # Use lazy imports
+        requests = _get_requests()
 
-            url = f"{base_url}/v2/api?chainid={chain_id}&module=contract&action=getsourcecode&address={address}&apikey={api_key}"
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+        max_retries = 3
+        base_delay = 1  # seconds
 
-            if str(data.get('status')) == '1' and str(data.get('message')).upper() == 'OK':
-                return data
+        for attempt in range(max_retries):
+            try:
+                # Etherscan V2 API with chainid - correct format for 2025
+                chain_id = self.chain_ids[chain]
+                self.logger.info(f"Making Etherscan API request for {chain} (chain_id: {chain_id})")
 
-            if str(data.get('message')).upper() == 'NOTOK':
-                error_msg = data.get('result', 'Unknown error')
-                if 'deprecated V1 endpoint' in error_msg:
-                    raise Exception(f"Etherscan API key not compatible with V2. Please get a new V2 API key from https://etherscan.io/myapikey")
+                url = f"{base_url}/v2/api?chainid={chain_id}&module=contract&action=getsourcecode&address={address}&apikey={api_key}"
+                response = requests.get(url, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+
+                if str(data.get('status')) == '1' and str(data.get('message')).upper() == 'OK':
+                    return data
+
+                if str(data.get('message')).upper() == 'NOTOK':
+                    error_msg = data.get('result', 'Unknown error')
+                    if 'deprecated V1 endpoint' in error_msg:
+                        raise Exception(f"Etherscan API key not compatible with V2. Please get a new V2 API key from https://etherscan.io/myapikey")
+                    else:
+                        raise Exception(f"Etherscan API error: {error_msg}")
+
+                raise Exception(f"Unexpected Etherscan response: {data}")
+
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    self.logger.error(f"Network error fetching contract source after {max_retries} attempts: {e}")
+                    raise Exception(f"Network error: {str(e)}")
                 else:
-                    raise Exception(f"Etherscan API error: {error_msg}")
+                    # Exponential backoff for rate limiting
+                    delay = base_delay * (2 ** attempt)
+                    self.logger.warning(f"API request failed (attempt {attempt + 1}/{max_retries}), retrying in {delay}s: {e}")
+                    import time
+                    time.sleep(delay)
 
-            raise Exception(f"Unexpected Etherscan response: {data}")
-
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"Network error fetching contract source: {e}")
-            raise Exception(f"Network error: {str(e)}")
-        except Exception as e:
-            self.logger.error(f"Error fetching contract source: {e}")
-            raise
+        # Should never reach here, but just in case
+        raise Exception("Unexpected error in API retry logic")
 
     def get_transaction_count(self, address: str, chain: str) -> int:
-        """Fetch transaction count using Etherscan V2 API."""
+        """Fetch transaction count using Etherscan V2 API with rate limiting."""
         if chain not in self.api_bases:
             self.logger.warning(f"Unsupported chain {chain}; cannot fetch transaction count.")
             return 0
@@ -822,24 +942,41 @@ class ComprehensiveContractAnalyzer:
             self.logger.warning("Invalid address format")
             return 0
 
-        try:
-            # Etherscan V2 API format for transaction count
-            chain_id = self.chain_ids.get(chain, 1)  # Default to 1 if chain not found
-            url = f"{base_url}/v2/api?chainid={chain_id}&module=account&action=txlist&address={address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=asc&apikey={api_key}"
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+        # Use lazy imports
+        requests = _get_requests()
 
-            if data.get('status') == '1':
-                transactions = data.get('result', [])
-                return len(transactions)
-            else:
-                self.logger.warning(f"Failed to fetch tx count for {chain}: {data.get('message', 'Unknown')}")
-                return 0
+        max_retries = 2  # Fewer retries for transaction count (less critical)
+        base_delay = 1  # seconds
 
-        except Exception as e:
-            self.logger.error(f"Error fetching transaction count for {chain}: {e}")
-            return 0
+        for attempt in range(max_retries):
+            try:
+                # Etherscan V2 API format for transaction count
+                chain_id = self.chain_ids.get(chain, 1)  # Default to 1 if chain not found
+                url = f"{base_url}/v2/api?chainid={chain_id}&module=account&action=txlist&address={address}&startblock=0&endblock=99999999&page=1&offset=10000&sort=asc&apikey={api_key}"
+                response = requests.get(url, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+
+                if data.get('status') == '1':
+                    transactions = data.get('result', [])
+                    return len(transactions)
+                else:
+                    self.logger.warning(f"Failed to fetch tx count for {chain}: {data.get('message', 'Unknown')}")
+                    # Fallback: return 0 for now, could implement alternative methods
+                    return 0
+
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    self.logger.error(f"Error fetching transaction count for {chain} after {max_retries} attempts: {e}")
+                    return 0
+                else:
+                    # Exponential backoff for rate limiting
+                    delay = base_delay * (2 ** attempt)
+                    self.logger.warning(f"Transaction count request failed (attempt {attempt + 1}/{max_retries}), retrying in {delay}s: {e}")
+                    import time
+                    time.sleep(delay)
+
+        return 0
 
     def _compute_trust_risk_score(self, results: Dict[str, Any]) -> None:
         """Compute ensemble risk score and reputation index."""

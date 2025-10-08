@@ -1,18 +1,35 @@
 """Base analyzer class for all contract analysis modules."""
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
 
-from ..utils.logger import setup_logger
-from ..config import config
+if TYPE_CHECKING:
+    from ..config import Settings
+
+# Lazy import to avoid circular imports
+setup_logger = None
+config = None
+
+def _lazy_imports():
+    """Lazy import modules to prevent circular imports."""
+    global setup_logger, config
+    if setup_logger is None:
+        from ..utils.logger import setup_logger as _setup_logger
+        setup_logger = _setup_logger
+    if config is None:
+        from ..config import config as _config
+        config = _config
+    return setup_logger, config
 
 class BaseAnalyzer(ABC):
     """Base class for all contract analyzers."""
     
     def __init__(self):
         """Initialize the analyzer with a logger and configuration."""
-        self.logger = setup_logger(f"analyzer.{self.__class__.__name__}")
-        self.config = config
+        # Ensure imports are loaded
+        _setup_logger, _config = _lazy_imports()
+        self.logger = _setup_logger(f"analyzer.{self.__class__.__name__}")
+        self.config = _config
     
     @abstractmethod
     def analyze(self, contract_path: str, **kwargs) -> Dict[str, Any]:

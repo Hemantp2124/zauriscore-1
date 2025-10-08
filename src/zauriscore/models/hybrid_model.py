@@ -4,7 +4,7 @@ from typing import Dict, Tuple, Union, Optional
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
-from transformers import CodeBERTModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 

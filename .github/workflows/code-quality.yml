@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.9', '3.10', '3.11']
+        python-version: ['3.10', '3.11', '3.12']
     steps:
     - uses: actions/checkout@v4
       with:
@@ -46,7 +46,9 @@ jobs:
   sonarcloud:
     name: SonarCloud
     runs-on: ubuntu-latest
-    if: github.repository == 'your-org/zauriscore'  # Update with actual repo
+    # Only run SonarCloud when this repo is the intended one.
+    # To enable SonarCloud scanning, add the `SONAR_TOKEN` secret in this repository's Settings -> Secrets.
+    if: false  # Disabled - enable by setting to 'github.repository == your-org/zauriscore'
     steps:
     - uses: actions/checkout@v4
       with:
@@ -56,4 +58,4 @@ jobs:
       uses: SonarSource/sonarcloud-github-action@v3
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}  # Set in repo secrets
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
